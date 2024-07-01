@@ -1,0 +1,37 @@
+{
+  "include": [
+    "*.py",
+    "*.ipynb"
+  ],
+    "exclude": [
+      "test/**",
+      "LICENSE",
+      "tmp*",
+      "tmp*/**",
+      "*data*/**",
+      "taxo_data/**",
+      "*log","err",
+      "train/**",
+      "legacy/**",
+      "legacy*/**",
+      "readme_images/**",
+      "tmp*.ipynb",
+      "*pdf",
+      "*svg",
+      "*png",
+      "output/**",
+      "diamond",
+      "*dmnd",
+      "*fasta",
+      "*fa",
+      "*pdb",
+      "*json",
+      ".*/**",
+      ".test_results/**",
+      "experiments/**",
+      "hssp-3.1.5/**",
+      "train*/**",
+      "*tar",
+      "*pkl",
+    ]
+}
