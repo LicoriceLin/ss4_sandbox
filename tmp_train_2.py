@@ -59,10 +59,11 @@ torch_generator.manual_seed(seed)
 model_name='facebook/esm2_t12_35M_UR50D' #'facebook/esm2_t6_8M_UR50D'
 tokenizer:EsmTokenizer=EsmTokenizer.from_pretrained(model_name)
 
+mu='Mu'
 def map_fn(examples):
     tokenized_inputs = tokenizer(examples["seq"], truncation=False,padding=True)
     examples.update(tokenized_inputs)
-    examples['mu_ids']=[-100]+[OUTPUT_MAP.get(i,-1) for i in examples['mu']]+[-100]
+    examples[f'{mu}_ids']=[-100]+[OUTPUT_MAP.get(i,-1) for i in examples[mu]]+[-100]
     return examples
 
 def collate_fn(features:List[ITEM],max_length=800,train:bool=True,mask_rate=0.1):
@@ -73,7 +74,7 @@ def collate_fn(features:List[ITEM],max_length=800,train:bool=True,mask_rate=0.1)
             def padding(feature,del_len):
                 feature['input_ids']=feature['input_ids']+[1]*(-del_len)
                 feature['attention_mask']=feature['attention_mask']+[0]*(-del_len)
-                feature['mu_ids']=feature['mu_ids']+[-100]*(-del_len)
+                feature[f'{mu}_ids']=feature[f'{mu}_ids']+[-100]*(-del_len)
                 feature['idx_b']=0
             padding(feature,del_len)
         elif del_len>0:
@@ -81,7 +82,7 @@ def collate_fn(features:List[ITEM],max_length=800,train:bool=True,mask_rate=0.1)
             truncation=lambda x:[x[0]]+x[idx_b+1:idx_b+max_length-1]+[x[-1]]
             feature['input_ids']=truncation(feature['input_ids'])
             feature['attention_mask']=truncation(feature['attention_mask'])
-            feature['mu_ids']=truncation(feature['mu_ids'])
+            feature[f'{mu}_ids']=truncation(feature[f'{mu}_ids'])
             feature['idx_b']=idx_b+1
         else:
             feature['idx_b']=0
@@ -89,7 +90,7 @@ def collate_fn(features:List[ITEM],max_length=800,train:bool=True,mask_rate=0.1)
         for k in feature.keys():
             ret[k].append(feature[k])
             
-    for k in ['input_ids','attention_mask','mu_ids','idx_b']:
+    for k in ['input_ids','attention_mask',f'{mu}_ids','idx_b']:
         ret[k]=torch.tensor(ret[k],dtype=torch.long)
         
     ret['position_ids']=create_position_ids(
@@ -99,31 +100,33 @@ def collate_fn(features:List[ITEM],max_length=800,train:bool=True,mask_rate=0.1)
         _[torch.rand_like(_,dtype=torch.float16)>1-mask_rate]=tokenizer.mask_token_id
     return ret
         
-mu=pd.read_pickle('data/mu.pkl')
-mu=mu[mu['seq'].apply(lambda x:len(x))>0]
-dataset=Dataset.from_pandas(mu).map(map_fn)
+# mu=pd.read_pickle('data/mu.pkl')
+# mu=mu[mu['seq'].apply(lambda x:len(x))>0]
+# dataset=Dataset.from_pandas(mu).map(map_fn)
+dataset=Dataset.load_from_disk('data/af_swiss_muonly')
 loader=DataLoader(dataset,batch_size=8,collate_fn=partial(collate_fn,max_length=600,train=True,mask_rate=0.1))
 
 # %%
 device=0
-epoch=20
+epoch=0
 config=EsmConfig.from_pretrained(model_name)
 config.num_labels=NUM_CLASS
-model=EsmForTokenClassification.from_pretrained(model_name,config=config).to(device)
+model=EsmForTokenClassification(config=config)
+model.load_state_dict(torch.load('data/ep-99.pt'))
+model.to(device)
 model.train()
 # model.load_state_dict(torch.load('train/esm2_t12_240625-152559_seed42/ep-19.pt'))
 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-optimizer = Adam(model.parameters(), lr=1e-5,weight_decay=1e-7)
+optimizer = Adam(model.parameters(), lr=1e-6,weight_decay=1e-7)
 # scheduler = OneCycleLR(optimizer, max_lr=5e-5, steps_per_epoch=len(loader), epochs=epoch)
 # schedulers = [ConstantLR(optimizer, factor=1e-2, total_iters=1),
 #               ConstantLR(optimizer, factor=1e2, total_iters=1),
 #               ExponentialLR(optimizer, gamma=0.95)]
 # scheduler = ChainedScheduler(schedulers)\
 # scheduler = ExponentialLR(optimizer, gamma=0.95)
-schedulers = [ConstantLR(optimizer, factor=1e-2, total_iters=1),
-              ConstantLR(optimizer, factor=1e-1, total_iters=1),
+schedulers = [ConstantLR(optimizer, factor=1e-1, total_iters=1),
               ExponentialLR(optimizer, gamma=0.95)]
-scheduler = SequentialLR(optimizer,schedulers,[1,2])
+scheduler = SequentialLR(optimizer=optimizer,schedulers=schedulers,milestones=[1])
 criterion=nn.CrossEntropyLoss()
 metrics=MulticlassMetric(num_classes=NUM_CLASS)
 # %%
@@ -135,15 +138,13 @@ writer = SummaryWriter(log_dir=f'{odir}/log')
 step=0
 def train_epoch():
     global step,losses
-    
-    
     for iteration, (batch) in enumerate(loader):
         optimizer.zero_grad()
         pred=model(batch['input_ids'].to(device),
                    batch['attention_mask'].to(device),
                    position_ids=batch['position_ids'].to(device)).logits
         # pred=nn.functional.softmax(pred,-1)
-        target=batch['mu_ids'].to(device)
+        target=batch[f'{mu}_ids'].to(device)
         loss:torch.Tensor = criterion(pred.permute(0, 2, 1),target)
         if loss.item()<5:
             loss.backward()
@@ -158,7 +159,7 @@ def train_epoch():
         # writer.add_scalar(f"loss", loss.item(), step)
         # import pdb;pdb.set_trace()
         
-        if step%50==0:
+        if step%100==0:
             result = metrics.compute()
             step_log = f"training: [{iteration}/{len(loader)}]\t"
             l_=sum(losses)/len(losses)
@@ -176,10 +177,12 @@ def train_epoch():
             metrics.reset()
             print(step_log)
             
-for epoch in range(0,100):
+        if step%5000==0:
+            torch.save(model.state_dict(), f'{odir}/step-{step}.pt')
+            scheduler.step()
+                
+for epoch in range(epoch,epoch+20):
     losses=[]
     writer.add_scalar("epoch", epoch, step)
     train_epoch()
-    scheduler.step()
-    if epoch%3==0:
-        torch.save(model.state_dict(), f'{odir}/ep-{epoch}.pt')
+    

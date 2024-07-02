@@ -12,7 +12,7 @@ tmp*.py
 *.log
 *.pkl
 tmp*
-train
+train*/**
 legacy_train/
 .test*/**
 *.list
