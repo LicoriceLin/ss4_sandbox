@@ -13,8 +13,7 @@ class Metrics(Metric):
         self.metrics = metrics
         
     @torch.inference_mode()
-    def update(self, input, target):  # pylint: disable=W0221, W0622
-        # pylint: disable=W0201
+    def update(self, input, target):  
         if isinstance(input, torch.Tensor):
             input, target = input.to(self.device), target.to(self.device)
         self.inputs.append(input)
@@ -37,7 +36,6 @@ class Metrics(Metric):
 
     @torch.inference_mode()
     def sync(self):
-        # pylint: disable=E0203, W0201
         synced_inputs = [None for _ in dist.get_world_size()]
         dist.all_gather_object(synced_inputs, self.inputs)
         self.inputs = [i for j in synced_inputs for i in j]
