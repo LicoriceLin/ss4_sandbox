@@ -5,6 +5,7 @@ from mhclassmodel import EsmTokenMhClassifier
 def cli_main():
     cli = LightningCLI(datamodule_class=MHClassDatasetModule, 
                        model_class=EsmTokenMhClassifier,
+                       parser_kwargs={"parser_mode": "omegaconf"}
                        )
 
 

@@ -37,7 +37,7 @@ class MHClassDatasetModule(L.LightningDataModule):
         batch_size:int=16,
         loader_thread:int=16,
         tokenizer_name:str='facebook/esm2_t12_35M_UR50D',
-        mask_rate:float=0.1
+        mask_rate:float=0.1,
         ):
         super().__init__()
         self.dataset_path=dataset_path
@@ -52,7 +52,7 @@ class MHClassDatasetModule(L.LightningDataModule):
         self.min_length=min_length
         self.label_init_subsetsize=label_init_subsetsize
         self.label_maps=label_maps
-        self.seed=data_seed
+        self.seed=data_seed #TODO no need for this
         self.split_ratio=split_ratio
         self.batch_size=batch_size
         self.mask_rate=mask_rate
@@ -61,22 +61,21 @@ class MHClassDatasetModule(L.LightningDataModule):
         self.tokenizer=AutoTokenizer.from_pretrained('facebook/esm2_t12_35M_UR50D')
         self._init_seed()
         self.save_hyperparameters(ignore=[])
-        self.assign_data()
         
     def _init_seed(self):
         self.random_generator=random.Random(self.seed)
         self.numpy_generator=np.random.default_rng(self.seed)
         self.torch_generator =torch.Generator().manual_seed(self.seed)
         
-    def assign_data(self):
+    def prepare_data(self):
         '''
         TODO split assign and downloads
         '''
         if self.dataset_path is not None:
-            self.innner_dataset=ds.load_from_disk(self.dataset_path)
-        elif self.dataframe:
+            innner_dataset=ds.load_from_disk(self.dataset_path)
+        elif self.dataframe is not None:
         # self.dataframe=dataframe
-            self.innner_dataset=ds.from_pandas(self.dataframe)
+            innner_dataset=ds.from_pandas(self.dataframe)
         else:
             raise ValueError('either `dataset_path` or `dataframe` should be assigned.')
         
@@ -92,39 +91,71 @@ class MHClassDatasetModule(L.LightningDataModule):
                         if i not in x:
                             return False
                 return True
-            self.innner_dataset=self.innner_dataset.filter(ds_filter)
-            self._init_labels()
-            self.innner_dataset=self.innner_dataset.map(self.map_fn)
-            self.innner_dataset.save_to_disk(self.preprocess_to)
-            
-        #generate label_maps
+            innner_dataset=innner_dataset.filter(ds_filter)
+            # init label_maps with priority: 
+            #     `label_maps` parameter > label_maps.pkl in `dataset_path` > self._init_labels
+            if self.label_maps is not None:
+                label_maps=self.label_maps
+            else:
+                label_maps_file=Path(str(self.dataset_path))/'label_maps.pkl'
+                if label_maps_file.exists():
+                    label_maps=pkl.load(open(label_maps_file,'rb'))
+                else:
+                    label_maps,label_counts,subsetsize=self._init_labels(innner_dataset)
+                    pkl.dump(label_counts,open(self.preprocess_to+f'/label_counts_{subsetsize}.pkl','wb'))
+            pkl.dump(label_maps,open(self.preprocess_to+'/label_maps.pkl','wb'))          
+            # map & save innner_dataset
+            map_fn=partial(self.map_fn,label_maps=label_maps)
+            innner_dataset=innner_dataset.map(map_fn)
+            innner_dataset.save_to_disk(self.preprocess_to)
+        
+    def _init_labels(self,innner_dataset:ds):
+        label_counts=defaultdict(lambda:defaultdict(int))
+        label_maps=defaultdict(lambda:defaultdict(int))
+        if self.label_init_subsetsize and self.label_init_subsetsize<len(innner_dataset):
+            subsetsize=self.label_init_subsetsize
+        else:
+            subsetsize=len(innner_dataset)
+        for item in innner_dataset.take(subsetsize).iter(batch_size=1):
+            for label_col in self.label_cols:
+            # for label_seq in self.dataframe[label_col]:
+                for label in item[label_col][0]:
+                    label_counts[label_col][label]+=1
+        for label_col in self.label_cols:
+            for i,t in enumerate(label_counts[label_col].keys()):
+                if t not in self.ignore_labels:
+                    label_maps[label_col][t]=i
+        return dict(label_maps),dict(label_counts),subsetsize
+    
+    def setup(self,stage:str):
+        '''
+        stage: fit,test,pred
+        '''
+        # if stage == "fit":
+        #load innner_dataset
+        if self.need_preprocess:
+            self.innner_dataset=ds.load_from_disk(self.preprocess_to)
+        elif self.dataset_path is not None:
+            self.innner_dataset=ds.load_from_disk(self.dataset_path)
+        elif self.dataframe is not None:
+             self.innner_dataset=ds.from_pandas(self.dataframe)
+        else:
+            raise ValueError('No valid dataset given.')
+        #load label_maps (for inner control)
         if self.label_maps is None:
             label_maps_file=Path(str(self.dataset_path))/'label_maps.pkl'
             if label_maps_file.exists():
                 self.label_maps=pkl.load(open(label_maps_file,'rb'))
             else:
-                raise ValueError(('No `label_maps`, you may: '
-                                  'specify it; set `need_preprocess` as True; '
-                                  'put it as `label_maps.pkl` in `dataset_path` dir'))
-        else:
-            if self.preprocess_to is not None and not (Path(self.preprocess_to)/'label_maps.pkl').exists():
-                pkl.dump(dict(self.label_maps),open(self.preprocess_to+'/label_maps.pkl','wb'))   
-                
-    def _init_labels(self):
-        label_counts=defaultdict(lambda:defaultdict(int))
-        self.label_maps=defaultdict(lambda:defaultdict(int))
-        subsetsize=self.label_init_subsetsize if self.label_init_subsetsize else len(self.innner_dataset)
-        for item in self.innner_dataset.take(subsetsize).iter(batch_size=1):
-            for label_col in self.label_cols:
-            # for label_seq in self.dataframe[label_col]:
-                for label in item[label_col][0]:
-                    label_counts[label_col][label]+=1
-            for i,t in enumerate(label_counts[label_col].keys()):
-                if t not in self.ignore_labels:
-                    self.label_maps[label_col][t]=i
-        self.label_maps=dict(self.label_maps)
-        pkl.dump(self.label_maps,open(self.preprocess_to+'/label_maps.pkl','wb'))            
-        pkl.dump(dict(label_counts),open(self.preprocess_to+f'/label_counts_{subsetsize}.pkl','wb'))      
+                label_maps_file=Path(str(self.preprocess_to)+'/label_maps.pkl')
+                assert label_maps_file.exists(),'No valid label_maps given.'
+                self.label_maps=pkl.load(open(label_maps_file,'rb'))
+        #split 
+        self.trainset,self.valset,self.testset=random_split(
+            self.innner_dataset,lengths=self.split_ratio,generator=self.torch_generator
+        )
+        # else:
+        self.dataset=self.innner_dataset
         
     @property
     def map_fn(self)->Callable:
@@ -136,17 +167,20 @@ class MHClassDatasetModule(L.LightningDataModule):
             tokenized_inputs = self.tokenizer(item[feature_col], truncation=False,padding=True)
             item.update(tokenized_inputs)
             for label in label_cols:
-                item[f'{label}_ids']=[ignore_index]+[label_maps[label].get(i,-1) for i in item[label]]+[ignore_index]
+                item[f'{label}_ids']=[ignore_index]+[label_maps[label].get(i,self.ignore_index) for i in item[label]]+[ignore_index]
             for label in ignore_labels:
                 item.pop(label)
             return item
         return partial(map_fn,feature_col=self.feature_col,label_cols=self.label_cols,
-                       label_maps=self.label_maps,ignore_labels=self.ignore_labels,
+                       ignore_labels=self.ignore_labels,
                        ignore_index=self.ignore_index)
             
     @property
     def collate_fn(self)->Callable:
-        def collate_fn(items:List[ITEM],train:bool,max_length=800,mask_rate=0.1,feature_col:str="seq",label_cols:List[str]=['mu']):
+        def collate_fn(items:List[ITEM],train:bool,max_length=800,mask_rate=0.1,
+                       label_cols:List[str]=['mu'],pad_to_longest:bool=False):
+            if pad_to_longest:
+                max_length=max([len(item['input_ids']) for item in items])
             ret=defaultdict(list)
             for item in items:
                 del_len=len(item['input_ids'])-max_length
@@ -182,7 +216,7 @@ class MHClassDatasetModule(L.LightningDataModule):
                 ret['input_ids'][(r_>1-mask_rate) & (ret['input_ids']>2)]=self.tokenizer.mask_token_id
                 # _[torch.rand_like(_,dtype=torch.float16)>1-mask_rate]=tokenizer.mask_token_id
             return dict(ret)
-        return partial(collate_fn,max_length=self.max_length,feature_col=self.feature_col,label_cols=self.label_cols,mask_rate=self.mask_rate)
+        return partial(collate_fn,max_length=self.max_length,label_cols=self.label_cols,mask_rate=self.mask_rate)
             
     def train_dataloader(self):
         collate_fn=partial(self.collate_fn,train=True)
@@ -195,7 +229,7 @@ class MHClassDatasetModule(L.LightningDataModule):
             collate_fn=collate_fn,num_workers=self.loader_thread)
     
     def test_dataloader(self):
-        collate_fn=partial(self.collate_fn,train=False)
+        collate_fn=partial(self.collate_fn,train=False,pad_to_longest=True)
         return DataLoader(self.testset, batch_size=self.batch_size,
             collate_fn=collate_fn,num_workers=self.loader_thread)
     
@@ -203,17 +237,6 @@ class MHClassDatasetModule(L.LightningDataModule):
         collate_fn=partial(self.collate_fn,train=False)
         return DataLoader(self.dataset, batch_size=self.batch_size,
             collate_fn=collate_fn,num_workers=self.loader_thread)
-
-    def setup(self,stage:str):
-        '''
-        stage: fit,test,pred
-        '''
-        # if stage == "fit":
-        self.trainset,self.valset,self.testset=random_split(
-            self.innner_dataset,lengths=self.split_ratio,generator=self.torch_generator
-        )
-        # else:
-        self.dataset=self.innner_dataset
             
     def state_dict(self):
         return dict(self.hparams)
@@ -222,24 +245,33 @@ class MHClassDatasetModule(L.LightningDataModule):
         '''
         untested
         '''
-        self.__init__(**state_dict)
+        # import pdb;pdb.set_trace()
+        # self.__init__(**state_dict)
         # raise NotImplementedError
     
+    
 #%%
-
 if 0:
     # mhds=MHClassDatasetModule(dataset_path='../AF_SWISS/',
     #                         label_cols=['Mu'],
     #                         ignore_labels=['Conf3', 'Conf4', 'Conf16', 'NENConf16', 'RENConf16', 'NENDist16'],
     #                         preprocess_to='data/AF_SWISS_Mu'
     #                         )
-    mhds1=MHClassDatasetModule(dataset_path='data/AF_SWISS_Mu',
-                            label_cols=['Mu'],
-                            ignore_labels=['Conf3', 'Conf4', 'Conf16', 'NENConf16', 'RENConf16', 'NENDist16'],
+    innner_dataset=ds.load_from_disk('../AF_SWISS/').take(100)
+    mhds=MHClassDatasetModule(dataset_path='data/samll_test_data',
+                            label_cols=['Conf3','NENConf16', 'RENConf16', 'NENDist16'],
+                            ignore_labels=['Mu', 'Conf4', 'Conf16'],
+                            preprocess_to='data/small_AF_SWISS_factor',
+                            need_preprocess=True,
+                            label_init_subsetsize=10000
+                            )
+    mhds1=MHClassDatasetModule(dataset_path='data/small_AF_SWISS_factor',
+                            label_cols=['Conf3','NENConf16', 'RENConf16', 'NENDist16'],
+                            ignore_labels=['Mu', 'Conf4', 'Conf16'],
                             need_preprocess=False,
                             )
     mhds1.prepare_data()
-    mhds1.set_up('fit')
+    mhds1.setup('fit')
     train_loader=mhds1.train_dataloader()
     for i in train_loader:
         break
