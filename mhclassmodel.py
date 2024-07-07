@@ -31,6 +31,8 @@ class EsmTokenMhClassification(EsmPreTrainedModel):
         '''
         config=EsmConfig.from_pretrained(model_name)
         super().__init__(config)
+        # TODO module initialization is prior to label_maps generation.
+        # allow direct passing of `num_mhlabels``
         if label_maps:
             self.label_maps = label_maps
         else:
@@ -382,13 +384,13 @@ class MetricsAggCallback(Callback):
     def on_train_end(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
         self._share_agg(pl_module,'train')
         
-    def on_validation_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
-        self._share_agg(pl_module,'train')
+    # def on_validation_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
+    #     self._share_agg(pl_module,'train')
     def on_test_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
         self._share_agg(pl_module,'train')
         
     def on_validation_epoch_end(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
-        self._share_agg(pl_module,'val')
+        self._share_agg(pl_module,'val',on_step=False)
 
     def on_test_epoch_end(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
         self._share_agg(pl_module,'test',on_step=False)
