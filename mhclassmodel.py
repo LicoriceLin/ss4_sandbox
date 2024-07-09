@@ -346,11 +346,12 @@ class EsmTokenMhClassifier(L.LightningModule):
                 with PdfPages(self.test_output_dir/f'{k}_sum.pdf') as sumpdf:
                     for if_soft,matrix in zip(('hard','soft'),
                             (confusion_matrices[k],soft_confusion_matrices[k])):
+                        torch.save(matrix,self.test_output_dir/f'{k}_{if_soft}_confusion_matrix.pt')
                         m=norm_confusion_matrix(matrix)
                         fig,ax=plot_confusion_matrix(m,label_maps=self.inner_model.label_maps[k])
                         ax.set_title(f'{if_soft}_confusion_matrix')
                         sumpdf.savefig(fig); plt.close(fig)
-                        fig,ax=plot_accuracy(m,label_maps=self.inner_model.label_maps[k])
+                        fig,ax=plot_accuracy(matrix,label_maps=self.inner_model.label_maps[k])
                         ax.set_title(f'{if_soft}_accuracy')
                         sumpdf.savefig(fig); plt.close(fig)
         del self.playground

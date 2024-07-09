@@ -21,6 +21,34 @@ optional_cmap_pairs={
 }
 cmap_pred,cmap_label=optional_cmap_pairs['default/blue_green_yellow'].values()
 
+def plot_color_scheme(
+        cmap_pred:Colormap=cmap_pred,
+        cmap_label:Colormap=cmap_label,
+        height:int=10,): 
+    # overlap_strategy:str='mean'
+    # '''
+    # `overlap_strategy`:"sum","mean","norm"
+    # '''
+    fig,ax=plt.subplots(1,1,figsize=(height,height))
+    ax:Axes
+    pred_mat=torch.linspace(0,1,steps=10).unsqueeze(1).repeat(1,10)
+    label_mat=torch.linspace(0,1,steps=2).unsqueeze(1).repeat_interleave(5,0).repeat_interleave(10,1).T
+    color_mat=(cmap_pred(pred_mat)+cmap_label(label_mat))
+    # if overlap_strategy=='mean':
+    #     color_mat=color_mat/2
+    # elif overlap_strategy=='norm':
+    #     color_mat=color_mat/color_mat.max(axis=0).max(axis=0)
+    # elif overlap_strategy=='sum':
+    #     color_mat=color_mat
+    # else:
+    #     return ValueError('implemented overlap_strategy: "sum","mean","norm"')
+    ax.pcolormesh(color_mat/2,label='pred')
+    ax.set_xticks([2.5,7.5],['False','True'])
+    ax.set_xlabel('true_label')
+    ax.set_ylabel('pred_prob')
+    ax.set_yticks(torch.linspace(0,10,steps=11).numpy(),torch.linspace(0,1,steps=11).numpy())
+    return fig,ax
+
 def plot_stack_heatmap(pred:torch.Tensor,label:torch.Tensor,
         label_maps:Optional[Dict[str,int]]=None,
         cmap_pred:Colormap=cmap_pred,
@@ -44,32 +72,17 @@ def plot_stack_heatmap(pred:torch.Tensor,label:torch.Tensor,
     fig.tight_layout()
     return ax.figure,ax
     
-def plot_color_scheme(
-        cmap_pred:Colormap=cmap_pred,
-        cmap_label:Colormap=cmap_label,
-        height:int=10):
-    fig,ax=plt.subplots(1,1,figsize=(height,height))
-    ax:Axes
-    pred_mat=torch.linspace(0,1,steps=10).unsqueeze(1).repeat(1,10)
-    label_mat=torch.linspace(0,1,steps=2).unsqueeze(1).repeat_interleave(5,0).repeat_interleave(10,1).T
-    ax.pcolormesh((cmap_pred(pred_mat)+cmap_label(label_mat))/2,label='pred')
-    ax.set_xticks([2.5,7.5],['False','True'])
-    ax.set_xlabel('true_label')
-    ax.set_ylabel('pred_prob')
-    ax.set_yticks(torch.linspace(0,10,steps=11).numpy(),torch.linspace(0,1,steps=11).numpy())
-    return fig,ax
-
 def cal_confusion_matrix(pred:torch.Tensor,label:torch.Tensor,soft:bool=True):
     num_classes=pred.shape[-1]
     confusion = torch.zeros(num_classes, num_classes)
     if not soft:
         pred=F.one_hot(torch.argmax(pred,dim=-1),num_classes=num_classes).float()
     confusion.index_add_(0, label.squeeze(), pred)
-    return confusion
+    return confusion.T
 
 def norm_confusion_matrix(confusion_matrix:torch.Tensor,eps=1e-8):
     confusion_matrix=confusion_matrix+eps
-    return confusion_matrix/confusion_matrix.sum(dim=1).unsqueeze(1)
+    return confusion_matrix/confusion_matrix.sum(dim=0).unsqueeze(0)
     
 def plot_confusion_matrix(confusion_matrix:torch.Tensor,
                           token_cluster:bool=False,
@@ -78,9 +91,9 @@ def plot_confusion_matrix(confusion_matrix:torch.Tensor,
                           cmap:Union[str,Colormap]='Greens',
                           cbar:bool=False,
                           **kwargs):
-    if token_cluster:
-        raise NotImplementedError('do it later ~')
-    
+    '''
+    it's recommended to do `norm_confusion_matrix` first.
+    '''
     if ax is None:
         fig, ax = plt.subplots(1,1,figsize=(15,15))
         
@@ -90,10 +103,16 @@ def plot_confusion_matrix(confusion_matrix:torch.Tensor,
     else:
         r_label_maps={v:k for k,v in label_maps.items()}
         labels=[r_label_maps[i] for i in r_]
-        
-    sns.heatmap(confusion_matrix,ax=ax,rasterized=True,
+    if token_cluster:
+        sns.clustermap(confusion_matrix,ax=ax,rasterized=True,
                 xticklabels=labels,yticklabels=labels,
                 cmap=cmap,cbar=cbar,**kwargs)
+    else:
+        sns.heatmap(confusion_matrix,ax=ax,rasterized=True,
+                xticklabels=labels,yticklabels=labels,
+                cmap=cmap,cbar=cbar,**kwargs)
+    ax.set_xlabel('True')
+    ax.set_ylabel('Pred')
     return ax.figure,ax
 
 def plot_accuracy(confusion_matrix:torch.Tensor,
@@ -112,7 +131,6 @@ def plot_accuracy(confusion_matrix:torch.Tensor,
         
     sum_labels=confusion_matrix.sum(axis=0).tolist()
     idx=torch.arange(len(sum_labels))
-    correct_labels=confusion_matrix[idx,idx].tolist()
     correct_labels=confusion_matrix[idx,idx].tolist()
     ax.bar(idx, sum_labels, label='Total Samples', color=color_pair[0], width=0.5)
     ax.bar(idx, correct_labels, label='Correct Predictions', color=color_pair[1], width=0.5)
