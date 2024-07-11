@@ -17,3 +17,6 @@ legacy_train/
 .test*/**
 *.list
 *txt
+
+*.pdb
+*.pdb.gz
