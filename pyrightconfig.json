@@ -4,7 +4,8 @@
     "*.ipynb"
   ],
     "exclude": [
-      "test/**",
+      "*test/",
+      "hssp-3.1.5/",
       "LICENSE",
       "tmp*",
       "tmp*/**",
@@ -21,11 +22,12 @@
       "*png",
       "output/**",
       "diamond",
-      "*dmnd",
-      "*fasta",
-      "*fa",
-      "*pdb",
-      "*json",
+      "*.dmnd",
+      "*.fasta",
+      "*.fa",
+      "*.pdb",
+      "*.json",
+      "*.txt",
       ".*/**",
       ".test_results/**",
       "experiments/**",
@@ -33,5 +35,6 @@
       "train*/**",
       "*tar",
       "*pkl",
+      "reseek*"
     ]
 }

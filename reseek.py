@@ -1,3 +1,4 @@
+#%%
 from Bio.SeqIO import read
 from subprocess import run
 from pathlib import Path
@@ -6,7 +7,10 @@ import numpy as np
 import gzip
 import shutil
 ALPHAS=['Mu','Conf3','Conf4','Conf16','NENConf16','RENConf16','NENDist16','RENConf16']
-def cal_mu(infile:str,mubin='/home/rnalab/zfdeng/ss4/ss4_sandbox/reseek'):
+
+def cal_mu(infile:str,
+           mubin='/home/rnalab/zfdeng/ss4/ss4_sandbox/reseek',
+           alphas=ALPHAS):
     infile:Path=Path(infile).absolute()
     stem=infile.stem
     mubin =Path(mubin).absolute()
@@ -25,7 +29,7 @@ def cal_mu(infile:str,mubin='/home/rnalab/zfdeng/ss4/ss4_sandbox/reseek'):
                 'structs.fa'],cwd=tdir,capture_output=True)
             output['seq']=str(read(f'{tdir}/structs.fa',format='fasta').seq)
             
-            for i in ALPHAS:
+            for i in alphas:
                 _=run([mubin,
                     '-pdb2alpha',
                     infile_,
@@ -39,7 +43,7 @@ def cal_mu(infile:str,mubin='/home/rnalab/zfdeng/ss4/ss4_sandbox/reseek'):
             output[i]=''
     return output
     
-    
+#%%
 if __name__=='__main__':
     from multiprocessing import Pool
     from glob import glob
