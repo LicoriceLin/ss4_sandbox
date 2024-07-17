@@ -59,7 +59,7 @@ class MulticlassMetricBase(Metric):
                ) -> None:
         if pLDDT is None:
             pLDDT=torch.ones_like(label,
-                dtype=pred.dtype,device=pred.dtype)
+                dtype=pred.dtype,device=pred.device)
             
         mask=(label!=self.ignore_index).reshape(-1) & (pLDDT>=self.plddt_threshold).reshape(-1)
         valid_pred=pred.reshape(-1,pred.shape[-1])[mask].detach().half()
