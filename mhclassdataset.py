@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 import pickle as pkl
-from typing import Dict,Union,List,Optional,Any
+from typing import Dict,Union,List,Optional,Any,Literal
 import random
 from datasets import Dataset as ds
 from transformers.models.esm.modeling_esm import create_position_ids_from_input_ids as create_position_ids
@@ -38,7 +38,11 @@ class MHClassDatasetModule(L.LightningDataModule):
         loader_thread:int=16,
         tokenizer_name:str='facebook/esm2_t12_35M_UR50D',
         mask_rate:float=0.1,
+        plddt_strategy:Literal['mask','weight','none']='none',#None, 'mask','weight'
+        # plddt_param:Optional[float]=None,#for 'mask': the threshold to ignore, for 'weight': the exponent
+        prep_num_proc:Optional[int]=None #TODO now with bug and not working
         ):
+        ##Conserved keys: pLDDT, stem
         super().__init__()
         self.dataset_path=dataset_path
         self.dataframe=dataframe
@@ -58,19 +62,21 @@ class MHClassDatasetModule(L.LightningDataModule):
         self.mask_rate=mask_rate
         self.loader_thread=loader_thread
         self.tokenizer_name=tokenizer_name
+        self.plddt_strategy=plddt_strategy
+        if self.plddt_strategy=='none': 
+            self.plddt_strategy=None
+        self.prep_num_proc=prep_num_proc
         self.tokenizer=AutoTokenizer.from_pretrained('facebook/esm2_t12_35M_UR50D')
         self._init_seed()
         self.save_hyperparameters(ignore=[])
         
     def _init_seed(self):
+        #TODO remove, simply use global seed
         self.random_generator=random.Random(self.seed)
         self.numpy_generator=np.random.default_rng(self.seed)
         self.torch_generator =torch.Generator().manual_seed(self.seed)
         
     def prepare_data(self):
-        '''
-        TODO split assign and downloads
-        '''
         if self.dataset_path is not None:
             innner_dataset=ds.load_from_disk(self.dataset_path)
         elif self.dataframe is not None:
@@ -106,7 +112,7 @@ class MHClassDatasetModule(L.LightningDataModule):
             pkl.dump(label_maps,open(self.preprocess_to+'/label_maps.pkl','wb'))          
             # map & save innner_dataset
             map_fn=partial(self.map_fn,label_maps=label_maps)
-            innner_dataset=innner_dataset.map(map_fn)
+            innner_dataset=innner_dataset.map(map_fn,num_proc=self.prep_num_proc)
             innner_dataset.save_to_disk(self.preprocess_to)
         
     def _init_labels(self,innner_dataset:ds):
@@ -133,7 +139,7 @@ class MHClassDatasetModule(L.LightningDataModule):
         '''
         # if stage == "fit":
         #load innner_dataset
-        if self.need_preprocess:
+        if self.preprocess_to is not None:
             self.innner_dataset=ds.load_from_disk(self.preprocess_to)
         elif self.dataset_path is not None:
             self.innner_dataset=ds.load_from_disk(self.dataset_path)
@@ -159,28 +165,28 @@ class MHClassDatasetModule(L.LightningDataModule):
         
     @property
     def map_fn(self)->Callable:
-        def map_fn(item:Dict[str,str],feature_col:str,
-                label_cols:List[str],
-                label_maps:Dict[str,Dict[str,Mapping]],
-                ignore_labels=[],
-                ignore_index=-100):
-            tokenized_inputs = self.tokenizer(item[feature_col], truncation=False,padding=True)
+        def map_fn(item:Dict[str,str],label_maps:Dict[str,Dict[str,int]]):
+            tokenized_inputs = self.tokenizer(item[self.feature_col], truncation=False,padding=True)
             item.update(tokenized_inputs)
-            for label in label_cols:
-                item[f'{label}_ids']=[ignore_index]+[label_maps[label].get(i,self.ignore_index) for i in item[label]]+[ignore_index]
-            for label in ignore_labels:
+            for label in self.label_cols:
+                item[f'{label}_ids']=[self.ignore_index]+[label_maps[label].get(i,self.ignore_index) for i in item[label]]+[self.ignore_index]
+            if self.plddt_strategy is not None:
+                item['pLDDT']=[0.]+item['pLDDT']+[0.]
+                if max(item['pLDDT'])>1.:
+                    item['pLDDT']=[i/100 for i in item['pLDDT']]
+            for label in self.ignore_labels:
                 item.pop(label)
             return item
-        return partial(map_fn,feature_col=self.feature_col,label_cols=self.label_cols,
-                       ignore_labels=self.ignore_labels,
-                       ignore_index=self.ignore_index)
+        return map_fn
             
     @property
     def collate_fn(self)->Callable:
-        def collate_fn(items:List[ITEM],train:bool,max_length=800,mask_rate=0.1,
-                       label_cols:List[str]=['mu'],pad_to_longest:bool=False):
+        def collate_fn(items:List[ITEM],train:bool,
+                       pad_to_longest:bool=False):
             if pad_to_longest:
                 max_length=max([len(item['input_ids']) for item in items])
+            else:
+                max_length=self.max_length
             ret=defaultdict(list)
             for item in items:
                 del_len=len(item['input_ids'])-max_length
@@ -188,8 +194,10 @@ class MHClassDatasetModule(L.LightningDataModule):
                     def padding(item,del_len):
                         item['input_ids']=item['input_ids']+[1]*(-del_len)
                         item['attention_mask']=item['attention_mask']+[0]*(-del_len)
-                        for label in label_cols:
+                        for label in self.label_cols:
                             item[f'{label}_ids']=item[f'{label}_ids']+[-100]*(-del_len)
+                        if self.plddt_strategy is not None:
+                            item['pLDDT']=item['pLDDT']+[0.]*(-del_len)
                         item['idx_b']=0
                     padding(item,del_len)
                 elif del_len>0:
@@ -197,8 +205,10 @@ class MHClassDatasetModule(L.LightningDataModule):
                     truncation=lambda x:[x[0]]+x[idx_b+1:idx_b+max_length-1]+[x[-1]]
                     item['input_ids']=truncation(item['input_ids'])
                     item['attention_mask']=truncation(item['attention_mask'])
-                    for label in label_cols:
+                    for label in self.label_cols:
                         item[f'{label}_ids']=truncation(item[f'{label}_ids'])
+                    if self.plddt_strategy is not None:
+                        item['pLDDT']=truncation(item['pLDDT'])
                     item['idx_b']=idx_b+1
                 else:
                     item['idx_b']=0
@@ -206,17 +216,18 @@ class MHClassDatasetModule(L.LightningDataModule):
                 for k in item.keys():
                     ret[k].append(item[k])
                     
-            for k in ['input_ids','attention_mask','idx_b']+[f'{label}_ids' for label in label_cols]:
+            for k in ['input_ids','attention_mask','idx_b']+[f'{label}_ids' for label in self.label_cols]:
                 ret[k]=torch.tensor(ret[k],dtype=torch.long)
-                
+            if self.plddt_strategy is not None:
+                ret['pLDDT']=torch.tensor(ret['pLDDT'],dtype=torch.float)
             ret['position_ids']=create_position_ids(
                 ret['input_ids'],ret['attention_mask'],ret['idx_b'].reshape(-1,1))
             if train:
                 r_=torch.rand(size=ret['input_ids'].shape,generator=self.torch_generator,dtype=torch.float16)
-                ret['input_ids'][(r_>1-mask_rate) & (ret['input_ids']>2)]=self.tokenizer.mask_token_id
+                ret['input_ids'][(r_>1-self.mask_rate) & (ret['input_ids']>2)]=self.tokenizer.mask_token_id
                 # _[torch.rand_like(_,dtype=torch.float16)>1-mask_rate]=tokenizer.mask_token_id
             return dict(ret)
-        return partial(collate_fn,max_length=self.max_length,label_cols=self.label_cols,mask_rate=self.mask_rate)
+        return collate_fn
             
     def train_dataloader(self):
         collate_fn=partial(self.collate_fn,train=True)

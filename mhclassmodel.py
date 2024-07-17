@@ -3,11 +3,12 @@ from torch.optim.lr_scheduler import StepLR,OneCycleLR,ConstantLR,ExponentialLR,
 import torch
 from torch import Tensor
 from torch import nn
-from typing import Optional,Union,Tuple,List,Dict
+from typing import Optional,Union,Tuple,List,Dict,Literal
 from pathlib import Path
 import pickle as pkl
 import lightning as L
-from metrics import MulticlassMetric
+# from metrics import MulticlassMetric
+from mhcmetrics import MulticlassMetricCollection
 import logging
 from lightning.pytorch.callbacks import Callback
 from lightning import Trainer
@@ -108,12 +109,17 @@ class EsmTokenMhClassifier(L.LightningModule):
             optimizer:str="Adam",
             optimizer_kwargs:Dict[str,float]={
                 'lr':1e-5,'weight_decay':1e-7},
-            scheduler_kwargs:Dict[str,float]={ #TODO smooth warmup
+            scheduler_kwargs:Dict[str,Union[float,int]]={ #TODO smooth warmup
                 'update_step':5000,'warm_up_iter':2,
                 'warm_up_rate':1e-2,'exp_gamma':0.95},
             test_output_dir:str='test_output',
+            plddt_strategy:Literal['mask','weight','none']='none',
+            # None, 'mask', 'weight'
+            plddt_param:Optional[float]=None,
+            # for 'mask': the threshold to ignore, for 'weight': the exponent
             profile_test:bool=False
             ):
+        #Conserved keys: pLDDT,stem
         super().__init__()
         self.optimizer=optimizer
         self.optimizer_kwargs=optimizer_kwargs
@@ -125,23 +131,96 @@ class EsmTokenMhClassifier(L.LightningModule):
         self.finetuned_from=finetuned_from
         self._test_output_dir=test_output_dir
         self.profile_test=profile_test
+        self.plddt_strategy=plddt_strategy
+        if self.plddt_strategy=='none': 
+            self.plddt_strategy=None
+        self.plddt_param=plddt_param
         self.save_hyperparameters()
-        
-        self.criterion=nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.set_criterion()
+
         if finetuned_from:
             self.inner_model.load_state_dict(
                 torch.load(finetuned_from),strict=False)
-        #TODO remove dpt's metrics
-        self.metrics:Dict[str,MulticlassMetric]={}
-        for label,num in self.inner_model.num_mhlabels.items():
-            self.metrics[label]=MulticlassMetric(num_classes=num)
+        self.set_metrics()
+        # self.dumblogger.info('init dumblogger.')
+    
+    def set_criterion(self):
+        if self.plddt_strategy is None:
+            _criterion=nn.CrossEntropyLoss(ignore_index=self.ignore_index)
+            def _c(pred:Tensor,label:Tensor,plddt:Tensor=None)->Tensor:
+                return _criterion(pred.permute(0, 2, 1),label)
+        else:
+            _criterion=nn.CrossEntropyLoss(ignore_index=self.ignore_index,reduction='none')
+            if self.plddt_strategy=='mask':
+                assert 0<self.plddt_param<1
+                def _c(pred:Tensor,label:Tensor,plddt:Tensor=None)->Tensor:
+                    plddt.requires_grad=False
+                    losses:Tensor=_criterion(pred.permute(0, 2, 1),label)
+                    plddt=plddt.masked_fill(plddt>=self.plddt_param,1.)
+                    plddt=plddt.masked_fill(plddt<self.plddt_param,0.)
+                    mean_weighted_loss = (losses).mean()
+                    return mean_weighted_loss
+            elif self.plddt_strategy=='weight':
+                assert self.plddt_param>=1
+                def _c(pred:Tensor,label:Tensor,plddt:Tensor=None)->Tensor:
+                    plddt.requires_grad=False
+                    losses:Tensor=_criterion(pred.permute(0, 2, 1),label)
+                    plddt=plddt**self.plddt_param
+                    mean_weighted_loss = (losses).mean()
+                    return mean_weighted_loss
+            else:
+                raise ValueError(f'invalid `plddt_param`:{self.plddt_param}')
             
+            # def _c(pred:Tensor,label:Tensor,plddt:Tensor=None)->Tensor:
+            #     plddt.requires_grad=False
+            #     losses:Tensor=_criterion(pred.permute(0, 2, 1),label)
+            #     if self.plddt_strategy=='mask':
+            #         plddt=plddt.masked_fill(plddt>=self.plddt_param,1.)
+            #         plddt=plddt.masked_fill(plddt<self.plddt_param,0.)
+            #         # plddt[plddt>=self.plddt_param]=1.
+            #         # plddt[plddt<=self.plddt_param]=0.
+            #     elif self.plddt_strategy=='weight':
+            #         plddt=plddt**self.plddt_param
+            #     mean_weighted_loss = (losses).mean()
+            #     return mean_weighted_loss
+        self.criterion=_c
+    
+    def set_metrics(self):
+        #TODO remove dpt's metrics
+        # self.metrics:Dict[str,MulticlassMetric]={}
+        # for head_name,num_classes in self.inner_model.num_mhlabels.items():
+        #     self.metrics[head_name]=MulticlassMetric(num_classes=num_classes)
+
+        # self.metrics:Dict[str,Dict[str,MulticlassMetricCollection]]={}
+        if self.plddt_param is None:
+            plddt_threshold=0.
+        elif self.plddt_param>=1:
+            plddt_threshold=0.5  
+        else:
+            plddt_threshold=self.plddt_param
+        _prefix_map={'fit':'train/','validate':'val/','test':None}
+        for stage in ['fit','validate','test']: # 'test' goes `None`:
+            # self.metrics[stage]={}
+            prefix = _prefix_map[stage]
+            for head_name,num_classes in self.inner_model.num_mhlabels.items():
+                # self.metrics[stage][head_name]=
+                setattr(self,f'metrics_{stage}_{head_name}',
+                    MulticlassMetricCollection(
+                    num_classes=num_classes,
+                    head_name=head_name,
+                    ignore_index=self.ignore_index,
+                    plddt_threshold=plddt_threshold,
+                    prefix=prefix))
+                
+                
     @property
     def test_output_dir(self):
         try:
             return Path(self.trainer.default_root_dir)/self._test_output_dir
         except:
+            self.dumblogger.info('abnormal calling for `test_output_dir`.')
             return Path(self._test_output_dir)
+    
     @property
     def dumblogger(self):
         if not hasattr(self,'_dumblogger'):
@@ -155,22 +234,22 @@ class EsmTokenMhClassifier(L.LightningModule):
             self._dumblogger=logger
         return self._dumblogger
     
-    def metrics_update(self,k:str,pred:torch.Tensor,label:torch.Tensor):
-        mask=(label!=self.ignore_index).reshape(-1)
-        num_classes=pred.shape[-1]
-        valid_pred=pred.reshape(-1,num_classes)[mask].detach()
-        valid_label=label.reshape(-1)[mask].detach()
-        self.metrics[k].update(valid_pred, valid_label)
+    # def metrics_update(self,k:str,pred:torch.Tensor,label:torch.Tensor):
+    #     mask=(label!=self.ignore_index).reshape(-1)
+    #     num_classes=pred.shape[-1]
+    #     valid_pred=pred.reshape(-1,num_classes)[mask].detach()
+    #     valid_label=label.reshape(-1)[mask].detach()
+    #     self.metrics[k].update(valid_pred, valid_label)
         
-    def metrics_agg(self,split='train',on_step=True):
-        metrics_dict={}
-        for k,metrics in self.metrics.items():
-            result = metrics.compute()
-            for name, score in result.items():
-                metrics_dict[f'{split}/{k}_{name}']=score
-            metrics.reset()
-        self.log_dict(metrics_dict,on_step=on_step, sync_dist=True)
-        
+    # def metrics_agg(self,split='train',on_step=True):
+    #     metrics_dict={}
+    #     for k,metrics in self.metrics.items():
+    #         result = metrics.compute()
+    #         for name, score in result.items():
+    #             metrics_dict[f'{split}/{k}_{name}']=score
+    #         metrics.reset()
+    #     self.log_dict(metrics_dict,on_step=on_step, sync_dist=True)
+    
     def training_step(self, batch, batch_idx):
         output:Dict[str,Tensor]=self.inner_model(
             input_ids=batch['input_ids'],
@@ -180,61 +259,74 @@ class EsmTokenMhClassifier(L.LightningModule):
         losses={}
         loss=0
         for k,pred in output.items():
-            label:torch.Tensor=batch[f'{k}_ids']
-            if torch.isnan(pred).any():
-                label[torch.isnan(pred[k]).any(dim=-1)]=self.ignore_index
-                fail_idx=torch.where(torch.isnan(pred).any(-1).any(-1))[0].tolist()
-                #tmp
-                self._dumblogger.log('nan loss'+'\t'.join([f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
-                    for i in fail_idx]))
-            l_:torch.Tensor=self.criterion(pred.permute(0, 2, 1),label)
+            label=self._mask_nan(batch,pred,batch[f'{k}_ids'])
+            # label:torch.Tensor=batch[f'{k}_ids']
+            # if torch.isnan(pred).any():
+            #     label[torch.isnan(pred[k]).any(dim=-1)]=self.ignore_index
+            #     fail_idx=torch.where(torch.isnan(pred).any(-1).any(-1))[0].tolist()
+            #     #tmp
+            #     self.dumblogger.error('nan loss'+'\t'.join(
+            #         [f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
+            #         for i in fail_idx]))
+            plddt=batch['pLDDT'] if self.plddt_strategy is not None else None
+            l_:torch.Tensor=self.criterion(pred,label,plddt)
             if torch.isnan(l_):
-                self._dumblogger.log(f'still nan loss: {"\t".join(batch['stem'])}')
+                self.dumblogger.error(f'still nan loss: {"\t".join(batch['stem'])}')
                 l_=torch.tensor(5.0, requires_grad=True,device=self.device)
             loss+=l_
             losses[f'train/{k}_loss']=l_.item()
-            self.metrics_update(k,pred,label)
+            # self.metrics_update(k,pred,label)
+            metrics:MulticlassMetricCollection=getattr(self,f'metrics_fit_{k}')
+            metrics(pred, label,plddt)
+            self.log_dict(metrics)
         losses['train/loss']=loss.item()
         self.log_dict(losses, sync_dist=True)
         
-        if self.trainer.global_step%self.metrics_interval==0:
-            self.metrics_agg()
+        # if self.trainer.global_step%self.metrics_interval==0:
+        #     self.metrics_agg()
         return loss
 
-    def _check_nan(self,batch:dict,pred:torch.Tensor,label:torch.Tensor):
+    def _mask_nan(self,batch:dict,pred:torch.Tensor,label:torch.Tensor):
         if torch.isnan(pred).any():
-            label[torch.isnan(pred).any(dim=-1)]=self.ignore_index
-            fail_idx=torch.where(torch.isnan(pred).any(-1).any(-1))[0].tolist()
-            self._dumblogger.log('nan loss'+'\t'.join([f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
+            mask=torch.isnan(pred).any(dim=-1)
+            label=label.masked_fill(mask,self.ignore_index)
+            # label[torch.isnan(pred).any(dim=-1)]=self.ignore_index
+            fail_idx=torch.where(mask.any(dim=-1))[0].tolist()
+            self.dumblogger.error('nan loss'+'\t'.join([f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
                 for i in fail_idx]))
         return label
     
-    def _shared_eval(self, batch, batch_idx, prefix):
-        output:Dict[str,Tensor]=self.inner_model(
-            input_ids=batch['input_ids'],
-            attention_mask=batch['attention_mask'],
-            position_ids=batch['position_ids']
-            )
-        losses={}
-        loss=0
-        for k,pred in output.items():
-            label=batch[f'{k}_ids']
-            label=self._check_nan(batch,pred,label)
-            # if torch.isnan(pred).any():
-            #     label[torch.isnan(pred).any(dim=-1)]=self.ignore_index
-            #     fail_idx=torch.where(torch.isnan(pred).any(-1).any(-1))[0].tolist()
-            #     self._dumblogger.log('nan loss'+'\t'.join([f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
-            #         for i in fail_idx]))
-            l_:torch.Tensor=self.criterion(pred.permute(0, 2, 1),label)
-            if torch.isnan(l_):
-                l_=torch.tensor(5.0, requires_grad=True,device=self.device)
-            loss+=l_
-            losses[f'{prefix}/{k}_loss']=l_.item()
-            losses[f'{prefix}_loss']=loss.item()
-            self.metrics_update(k,pred,label)
+    # def _shared_eval(self, batch, batch_idx, prefix):
+    #     '''
+    #     legacy, to be removed
+    #     '''
+    #     output:Dict[str,Tensor]=self.inner_model(
+    #         input_ids=batch['input_ids'],
+    #         attention_mask=batch['attention_mask'],
+    #         position_ids=batch['position_ids']
+    #         )
+    #     losses={}
+    #     loss=0
+    #     for k,pred in output.items():
+    #         label=batch[f'{k}_ids']
+    #         label=self._mask_nan(batch,pred,label)
+    #         # if torch.isnan(pred).any():
+    #         #     label[torch.isnan(pred).any(dim=-1)]=self.ignore_index
+    #         #     fail_idx=torch.where(torch.isnan(pred).any(-1).any(-1))[0].tolist()
+    #         #     self._dumblogger.log('nan loss'+'\t'.join([f'{batch['stem'][i]}:{batch['idx_b'][i].item()}' 
+    #         #         for i in fail_idx]))
+    #         plddt=batch['pLDDT'] if self.plddt_strategy is not None else None
+    #         l_:torch.Tensor=self.criterion(pred.permute(0, 2, 1),label,plddt)
+    #         if torch.isnan(l_):
+    #             l_=torch.tensor(5.0, requires_grad=True,device=self.device)
+    #         loss+=l_
+    #         losses[f'{prefix}/{k}_loss']=l_.item()
+    #         losses[f'{prefix}_loss']=loss.item()
+    #         # self.metrics_update(k,pred,label)
+    #         self.metrics['validate'][k].update(pred, label,plddt)
             
-        losses[f'{prefix}/loss']=loss.item()
-        self.log_dict(losses,sync_dist=True)
+    #     losses[f'{prefix}/loss']=loss.item()
+    #     self.log_dict(losses,sync_dist=True)
 
     def validation_step(self, batch, batch_idx):
         prefix='val'
@@ -246,15 +338,17 @@ class EsmTokenMhClassifier(L.LightningModule):
         losses={}
         loss=0
         for k,pred in output.items():
-            label=batch[f'{k}_ids']
-            label=self._check_nan(batch,pred,label)
-            l_:torch.Tensor=self.criterion(pred.permute(0, 2, 1),label)
+            label=self._mask_nan(batch,pred,batch[f'{k}_ids'])
+            plddt=batch['pLDDT'] if self.plddt_strategy is not None else None
+            l_:torch.Tensor=self.criterion(pred,label,plddt)
             if torch.isnan(l_):
                 l_=torch.tensor(5.0,device=self.device)
             loss+=l_
             losses[f'{prefix}/{k}_loss']=l_.item()
-            self.metrics_update(k,pred,label)
-            
+            # self.metrics_update(k,pred,label)
+            metrics:MulticlassMetricCollection=getattr(self,f'metrics_validate_{k}')
+            metrics(pred, label,plddt)
+            self.log_dict(metrics)
         losses[f'{prefix}_loss']=loss.item()
         losses[f'{prefix}/loss']=loss.item()
         self.log_dict(losses,sync_dist=True)
@@ -274,13 +368,16 @@ class EsmTokenMhClassifier(L.LightningModule):
             # raw_opts[f'{k}_pred']=pred.to('cpu')
             label=batch[f'{k}_ids']
             # raw_opts[f'{k}_label']=label.to('cpu')
-            label=self._check_nan(batch,pred,label)
-            l_:torch.Tensor=self.criterion(pred.permute(0, 2, 1),label)
+            label=self._mask_nan(batch,pred,label)
+            plddt=batch['pLDDT'] if self.plddt_strategy is not None else None
+            l_:torch.Tensor=self.criterion(pred,label,plddt)
             if torch.isnan(l_):
                 l_=torch.tensor(5.0, requires_grad=False)
             loss+=l_
             losses[f'{k}_loss']=l_.item()
-            self.metrics_update(k,pred,label)
+            metrics:MulticlassMetricCollection=getattr(self,f'metrics_test_{k}')
+            metrics(pred, label,plddt)
+            self.log_dict(metrics)
             for i,stem in enumerate(batch['stem']):
                 pred_=pred[i]
                 label_=label[i]
@@ -296,11 +393,26 @@ class EsmTokenMhClassifier(L.LightningModule):
         optimizer:torch.optim.Optimizer=getattr(torch.optim,
                 self.optimizer)(params=self.inner_model.parameters(), **self.optimizer_kwargs)
         sk=self.scheduler_kwargs
+        
+        wu_iter=int(sk['warm_up_iter'])
+        wu_rate=sk['warm_up_rate']
+        assert wu_iter>0
+        # if wu_iter==1:
+        #     scheduler = SequentialLR(optimizer=optimizer,
+        #         schedulers=[ConstantLR(optimizer, 
+        #         factor=wu_rate, 
+        #         total_iters=1),
+        #         ExponentialLR(optimizer, gamma=sk['exp_gamma'])],milestones=[wu_iter])
+        # else:
+        r=(1/sk['warm_up_rate'])**(1/wu_iter)
+        schedulers=[]
+        for i in range(wu_iter):
+            schedulers.append(ConstantLR(optimizer, 
+            factor=wu_rate, total_iters=1))
+            wu_rate=wu_rate*r
+        schedulers.append(ExponentialLR(optimizer, gamma=sk['exp_gamma']))
         scheduler = SequentialLR(optimizer=optimizer,
-            schedulers=[ConstantLR(optimizer, 
-            factor=sk['warm_up_rate'], 
-            total_iters=int(sk['warm_up_iter'])),
-            ExponentialLR(optimizer, gamma=sk['exp_gamma'])],milestones=[self.scheduler_kwargs['warm_up_iter']])
+            schedulers=schedulers,milestones=list(range(1,wu_iter+1)))
         return {"optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
@@ -318,6 +430,7 @@ class EsmTokenMhClassifier(L.LightningModule):
         self.test_output_dir.mkdir(exist_ok=True)
         
     def clear_playground(self):
+        #TODO make a test metrics out of it
         self.to('cpu')
         torch.save(self.playground,
            self.test_output_dir/'raw_output.pt')
