@@ -158,7 +158,7 @@ class EsmTokenMhClassifier(L.LightningModule):
                     losses:Tensor=_criterion(pred.permute(0, 2, 1),label)
                     plddt=plddt.masked_fill(plddt>=self.plddt_param,1.)
                     plddt=plddt.masked_fill(plddt<self.plddt_param,0.)
-                    mean_weighted_loss = (losses).mean()
+                    mean_weighted_loss = (losses*plddt).mean()
                     return mean_weighted_loss
             elif self.plddt_strategy=='weight':
                 assert self.plddt_param>=1
@@ -166,7 +166,7 @@ class EsmTokenMhClassifier(L.LightningModule):
                     plddt.requires_grad=False
                     losses:Tensor=_criterion(pred.permute(0, 2, 1),label)
                     plddt=plddt**self.plddt_param
-                    mean_weighted_loss = (losses).mean()
+                    mean_weighted_loss = (losses*plddt).mean()
                     return mean_weighted_loss
             else:
                 raise ValueError(f'invalid `plddt_param`:{self.plddt_param}')
