@@ -15,7 +15,3 @@ git config --global user.email 'zhenfengdeng121@gmail.com'
 pip cache purge
 conda clean --all
 
-# cd SS4
-# az storage blob download-batch -d . -s traindata --pattern AF_SWISS/*  --account-name reseek0db
-# az storage blob download --account-name reseek0db --container-name traindata --name AF_SWISS_64 -f  AF_SWISS_64.tar.gz
-# git clone https://github.com/LicoriceLin/ss4_sandbox.git

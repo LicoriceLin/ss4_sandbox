@@ -59,7 +59,7 @@ trainer:
   plugins: null
   sync_batchnorm: false
   reload_dataloaders_every_n_epochs: 0
-  default_root_dir: train/mtl-nomask-nopretrain
+  default_root_dir: train/mtl-weight2-nopretrain
 model:
   inner_model:
     class_path: mhclassmodel.EsmTokenMhClassification
@@ -75,10 +75,10 @@ model:
   metrics_interval: ${trainer.log_every_n_steps}
   ignore_index: ${data.ignore_index} 
   optimizer: AdamW
-  plddt_strategy: none
-  plddt_param: null
-  # plddt_strategy: mask
-  # plddt_param: 0.5
+  # plddt_strategy: none
+  # plddt_param: null
+  plddt_strategy: weight
+  plddt_param: 2.0
   optimizer_kwargs:
     lr: 1.0e-06
     weight_decay: 1.0e-07
@@ -90,7 +90,7 @@ model:
 data:
   dataset_path: data/reseek_AF_SWISS-v2
   dataframe: null
-  need_preprocess: false
+  need_preprocess: true
   preprocess_to: data/AF_SWISS_mufactorized
   feature_col: seq
   label_cols:
