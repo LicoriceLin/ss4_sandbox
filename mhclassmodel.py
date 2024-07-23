@@ -1,5 +1,7 @@
 from transformers import EsmModel, EsmConfig, EsmTokenizer,EsmForTokenClassification,EsmPreTrainedModel
-from torch.optim.lr_scheduler import StepLR,OneCycleLR,ConstantLR,ExponentialLR,ChainedScheduler,SequentialLR
+from torch.optim.lr_scheduler import ConstantLR,ExponentialLR,ChainedScheduler,SequentialLR,ReduceLROnPlateau
+from torch.optim import lr_scheduler
+from bisect import bisect_right
 import torch
 from torch import Tensor
 from torch import nn
@@ -16,6 +18,23 @@ from lightning.pytorch.trainer.states import TrainerFn
 from pytorch_lightning.callbacks import ModelCheckpoint
 from collections import defaultdict
 # %%
+class RelaxSequentialLR(SequentialLR):
+    def step(self,metrics=None):
+        self.last_epoch += 1
+        idx = bisect_right(self._milestones, self.last_epoch)
+        scheduler = self._schedulers[idx]
+        if not isinstance(scheduler,ReduceLROnPlateau):
+            if idx > 0 and self._milestones[idx - 1] == self.last_epoch:
+                scheduler.step(0)
+            else:
+                scheduler.step()
+        else:
+            if idx > 0 and self._milestones[idx - 1] == self.last_epoch:
+                scheduler.step(metrics,0)
+            else:
+                scheduler.step(metrics)
+        self._last_lr = scheduler.get_last_lr()
+#%%
 class EsmTokenMhClassification(EsmPreTrainedModel):
     'multi-head token classification'
     def __init__(self, 
@@ -109,7 +128,7 @@ class EsmTokenMhClassifier(L.LightningModule):
             optimizer:str="Adam",
             optimizer_kwargs:Dict[str,float]={
                 'lr':1e-5,'weight_decay':1e-7},
-            scheduler_kwargs:Dict[str,Union[float,int]]={ #TODO smooth warmup
+            scheduler_kwargs:Dict[str,Union[float,int,str]]={ #TODO smooth warmup
                 'update_step':5000,'warm_up_iter':2,
                 'warm_up_rate':1e-2,'exp_gamma':0.95},
             test_output_dir:str='test_output',
@@ -121,14 +140,18 @@ class EsmTokenMhClassifier(L.LightningModule):
             ):
         #Conserved keys: pLDDT,stem
         super().__init__()
+        self.inner_model=inner_model
+        self.finetuned_from=finetuned_from
+        if finetuned_from:
+            # only load the model parameters and ignore training states
+            # TODO handle `strict`
+            self.load_state_dict(
+            torch.load(finetuned_from)['state_dict'],strict=True)
         self.optimizer=optimizer
         self.optimizer_kwargs=optimizer_kwargs
         self.scheduler_kwargs=scheduler_kwargs
-        
         self.metrics_interval=metrics_interval
         self.ignore_index=ignore_index
-        self.inner_model=inner_model
-        self.finetuned_from=finetuned_from
         self._test_output_dir=test_output_dir
         self.profile_test=profile_test
         self.plddt_strategy=plddt_strategy
@@ -137,10 +160,6 @@ class EsmTokenMhClassifier(L.LightningModule):
         self.plddt_param=plddt_param
         self.save_hyperparameters()
         self.set_criterion()
-
-        if finetuned_from:
-            self.inner_model.load_state_dict(
-                torch.load(finetuned_from),strict=False)
         self.set_metrics()
         # self.dumblogger.info('init dumblogger.')
     
@@ -393,32 +412,32 @@ class EsmTokenMhClassifier(L.LightningModule):
         optimizer:torch.optim.Optimizer=getattr(torch.optim,
                 self.optimizer)(params=self.inner_model.parameters(), **self.optimizer_kwargs)
         sk=self.scheduler_kwargs
-        
-        wu_iter=int(sk['warm_up_iter'])
-        wu_rate=sk['warm_up_rate']
-        assert wu_iter>0
-        # if wu_iter==1:
-        #     scheduler = SequentialLR(optimizer=optimizer,
-        #         schedulers=[ConstantLR(optimizer, 
-        #         factor=wu_rate, 
-        #         total_iters=1),
-        #         ExponentialLR(optimizer, gamma=sk['exp_gamma'])],milestones=[wu_iter])
-        # else:
-        r=(1/sk['warm_up_rate'])**(1/wu_iter)
-        schedulers=[]
-        for i in range(wu_iter):
-            schedulers.append(ConstantLR(optimizer, 
-            factor=wu_rate, total_iters=1))
-            wu_rate=wu_rate*r
-        schedulers.append(ExponentialLR(optimizer, gamma=sk['exp_gamma']))
-        scheduler = SequentialLR(optimizer=optimizer,
-            schedulers=schedulers,milestones=list(range(1,wu_iter+1)))
+        wu_iter=int(sk.pop('warm_up_iter'))
+        wu_rate=sk.pop('warm_up_rate')
+        update_step=int(sk.pop('update_step'))
+        #tmp
+        if 'exp_gamma' in sk: sk['gamma']=sk.pop('exp_gamma')
+        main_scheduler_cls=sk.pop('main_scheduler','ExponentialLR')
+        main_scheduler=getattr(lr_scheduler,main_scheduler_cls)(optimizer, **sk)
+        if wu_iter>0:
+            schedulers=[]
+            r=(1/wu_rate)**(1/wu_iter)
+            for i in range(wu_iter):
+                schedulers.append(ConstantLR(optimizer, 
+                factor=wu_rate, total_iters=1))
+                wu_rate=wu_rate*r
+            schedulers.append(main_scheduler)
+            scheduler = RelaxSequentialLR(optimizer=optimizer,
+                schedulers=schedulers,milestones=list(range(1,wu_iter+1)))
+        else:
+            scheduler=main_scheduler
         return {"optimizer": optimizer,
                 "lr_scheduler": {
                     "scheduler": scheduler,
                     "interval": "step",
-                    "frequency": sk['update_step'],
-                    "monitor": "train/loss",
+                    "frequency": update_step,
+                    "monitor": "val_loss",
+                    "reduce_on_plateau": True if main_scheduler_cls=='ReduceLROnPlateau' else False,
                     "strict": False,
                 },}
         
@@ -511,3 +530,10 @@ class MetricsAggCallback(Callback):
         
     def on_test_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
         pl_module.init_playground()
+
+class DebugCallback(Callback):
+    # def on_fit_start(self, trainer: Trainer, pl_module: L.LightningModule) -> None:
+    #     import pdb;pdb.set_trace()
+    def on_validation_epoch_end(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
+        scheduler=trainer.lr_scheduler_configs[0].scheduler
+        pl_module.log('lr',scheduler.optimizer.param_groups[0]['lr'])
