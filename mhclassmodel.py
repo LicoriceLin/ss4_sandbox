@@ -19,6 +19,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from collections import defaultdict
 # %%
 class RelaxSequentialLR(SequentialLR):
+    '''
+    BUGGED. TO BE REMOVED
+    '''
     def step(self,metrics=None):
         self.last_epoch += 1
         idx = bisect_right(self._milestones, self.last_epoch)
@@ -34,6 +37,16 @@ class RelaxSequentialLR(SequentialLR):
             else:
                 scheduler.step(metrics)
         self._last_lr = scheduler.get_last_lr()
+
+class RelaxChainedScheduler(ChainedScheduler):
+    def step(self,metrics=None):
+        for scheduler in self._schedulers:
+            if not isinstance(scheduler,ReduceLROnPlateau):
+                scheduler.step()
+            else:
+                scheduler.step(metrics)
+        self._last_lr = [group['lr'] for group in 
+            self._schedulers[-1].optimizer.param_groups]
 #%%
 class EsmTokenMhClassification(EsmPreTrainedModel):
     'multi-head token classification'
@@ -419,16 +432,21 @@ class EsmTokenMhClassifier(L.LightningModule):
         if 'exp_gamma' in sk: sk['gamma']=sk.pop('exp_gamma')
         main_scheduler_cls=sk.pop('main_scheduler','ExponentialLR')
         main_scheduler=getattr(lr_scheduler,main_scheduler_cls)(optimizer, **sk)
-        if wu_iter>0:
+        if wu_iter>1:
             schedulers=[]
             r=(1/wu_rate)**(1/wu_iter)
             for i in range(wu_iter):
                 schedulers.append(ConstantLR(optimizer, 
                 factor=wu_rate, total_iters=1))
                 wu_rate=wu_rate*r
-            schedulers.append(main_scheduler)
-            scheduler = RelaxSequentialLR(optimizer=optimizer,
-                schedulers=schedulers,milestones=list(range(1,wu_iter+1)))
+            # schedulers.append(main_scheduler)
+            scheduler = RelaxChainedScheduler(schedulers=[
+                SequentialLR(optimizer,schedulers,milestones=list(range(1,wu_iter))),
+                main_scheduler])
+        elif wu_iter==1:
+            scheduler = RelaxChainedScheduler(schedulers=[
+                ConstantLR(optimizer, factor=wu_rate, total_iters=1),
+                main_scheduler])
         else:
             scheduler=main_scheduler
         return {"optimizer": optimizer,
