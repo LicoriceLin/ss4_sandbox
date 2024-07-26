@@ -6,7 +6,7 @@ from torchmetrics.functional.classification import (
     )
 from torchmetrics.utilities import dim_zero_cat
 from torchmetrics.functional.classification.auroc import _reduce_auroc
-from typing import Optional,List,Union,Literal,Callable
+from typing import Optional,List,Union,Literal,Callable,Dict
 import torch
 from torch import Tensor
 from functools import partial
@@ -38,16 +38,17 @@ class MulticlassMetricBase(Metric):
 
     def __init__(self, 
             num_classes:int,
-            func:Callable[[Tensor,Tensor],Tensor],
+            func_dict:Dict[str,Callable[[Tensor,Tensor],Tensor]],
             ignore_index:int=-100,
             plddt_threshold:float=0.,
+            prefix:str=''
             ):
         super().__init__()
         self.num_classes=num_classes
-        self.func=func
+        self.func_dict=func_dict
         self.ignore_index=ignore_index
         self.plddt_threshold=plddt_threshold
-
+        self.prefix=prefix
         self.add_state("preds", default=[], dist_reduce_fx="cat")
         self.add_state("labels",default=[], dist_reduce_fx="cat")
         # self.add_state("pLDDTs",default=[], dist_reduce_fx="cat")
@@ -73,7 +74,7 @@ class MulticlassMetricBase(Metric):
     def compute(self):
         preds=dim_zero_cat(self.preds)
         labels=dim_zero_cat(self.labels)
-        return self.func(preds,labels)
+        return {self.prefix+k:func(preds,labels) for k,func in self.func_dict.items()}
     
 
 class MulticlassMetricCollection(MetricCollection):
@@ -84,19 +85,34 @@ class MulticlassMetricCollection(MetricCollection):
         plddt_threshold:float=0.,
         **kwargs):
         metrics={}
-        for name,_func in {
+        func_dict={
             'accuracy':multiclass_accuracy,
             'auroc':multiclass_auroc,
             'auprc':multiclass_auprc
-        }.items():
-            func=partial(_func,
+        }
+        func_dict={k:partial(func,
                 num_classes=num_classes,
                 average='macro'
-                #TODO more flexibility?
-                )
-            if plddt_threshold>0:
-                metrics[f'{head_name}-{name}-thresholded']=MulticlassMetricBase(
-                    num_classes,func,ignore_index,plddt_threshold)
-            metrics[f'{head_name}-{name}']=MulticlassMetricBase(
-                num_classes,func,ignore_index,0.)
+                ) for k,func in func_dict.items()}
+        
+        metrics[f'{head_name}_0']=MulticlassMetricBase(
+            num_classes,func_dict,ignore_index,0.,f'{head_name}_0')
+        metrics[f'{head_name}']=MulticlassMetricBase(
+            num_classes,func_dict,ignore_index,plddt_threshold,f'{head_name}')
+        # for name,_func in {
+        #     'accuracy':multiclass_accuracy,
+        #     'auroc':multiclass_auroc,
+        #     'auprc':multiclass_auprc
+        # }.items():
+        #     func=partial(_func,
+        #         num_classes=num_classes,
+        #         average='macro'
+        #         #TODO more flexibility?
+                # )
+
+            # if plddt_threshold>0:
+            #     metrics[f'{head_name}-{name}-thresholded']=MulticlassMetricBase(
+            #         num_classes,func,ignore_index,plddt_threshold)
+            # metrics[f'{head_name}-{name}']=MulticlassMetricBase(
+            #     num_classes,func,ignore_index,0.)
         super().__init__(metrics,**kwargs)
