@@ -58,17 +58,14 @@ class MulticlassMetricBase(Metric):
                pred: Tensor, label: Tensor,
                pLDDT: Optional[Tensor]=None
                ) -> None:
-        if pLDDT is None:
-            pLDDT=torch.ones_like(label,
-                dtype=pred.dtype,device=pred.device)
-            
-        mask=(label!=self.ignore_index).reshape(-1) & (pLDDT>=self.plddt_threshold).reshape(-1)
-        valid_pred=pred.reshape(-1,pred.shape[-1])[mask].detach().half()
-        valid_label=label.reshape(-1)[mask].detach()
+        mask=(label!=self.ignore_index).reshape(-1)
+        if pLDDT is not None:
+            mask=mask & (pLDDT>=self.plddt_threshold).reshape(-1)
+        label=label.reshape(-1).masked_select(mask)
+        valid_pred=pred.reshape(-1,pred.shape[-1])[mask].half()
         self.preds.append(valid_pred)
-        self.labels.append(valid_label)
-
-        # self.pLDDTs.append(pLDDT)
+        self.labels.append(label)
+        del pLDDT
     
     @torch.inference_mode()
     def compute(self):
@@ -95,10 +92,11 @@ class MulticlassMetricCollection(MetricCollection):
                 average='macro'
                 ) for k,func in func_dict.items()}
         
-        metrics[f'{head_name}_0']=MulticlassMetricBase(
-            num_classes,func_dict,ignore_index,0.,f'{head_name}_0')
+        metrics[f'0-{head_name}']=MulticlassMetricBase(
+            num_classes,func_dict,ignore_index,0.,f'0/{head_name}-')
         metrics[f'{head_name}']=MulticlassMetricBase(
-            num_classes,func_dict,ignore_index,plddt_threshold,f'{head_name}')
+            num_classes,func_dict,ignore_index,plddt_threshold,
+            f'{int(plddt_threshold*100)}/{head_name}-')
         # for name,_func in {
         #     'accuracy':multiclass_accuracy,
         #     'auroc':multiclass_auroc,

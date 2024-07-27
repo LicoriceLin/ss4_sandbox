@@ -35,7 +35,8 @@ class MHClassDatasetModule(L.LightningDataModule):
         data_seed:int=42,
         split_ratio:List[float]=[0.9,0.05,0.05],
         batch_size:int=16,
-        loader_thread:int=16,
+        loader_thread:int=32,
+        infer_batch_size:int=64,
         tokenizer_name:str='facebook/esm2_t12_35M_UR50D',
         mask_rate:float=0.1,
         plddt_strategy:Literal['mask','weight','none']='none',#None, 'mask','weight'
@@ -61,6 +62,7 @@ class MHClassDatasetModule(L.LightningDataModule):
         self.batch_size=batch_size
         self.mask_rate=mask_rate
         self.loader_thread=loader_thread
+        self.infer_batch_size=infer_batch_size
         self.tokenizer_name=tokenizer_name
         self.plddt_strategy=plddt_strategy
         if self.plddt_strategy=='none': 
@@ -189,6 +191,8 @@ class MHClassDatasetModule(L.LightningDataModule):
                 max_length=self.max_length
             ret=defaultdict(list)
             for item in items:
+                # if 'pLDDT' in item:
+                #     item['pLDDT']=[0.]+item['pLDDT']+[0.]
                 del_len=len(item['input_ids'])-max_length
                 if del_len<0:
                     def padding(item,del_len):
@@ -196,7 +200,7 @@ class MHClassDatasetModule(L.LightningDataModule):
                         item['attention_mask']=item['attention_mask']+[0]*(-del_len)
                         for label in self.label_cols:
                             item[f'{label}_ids']=item[f'{label}_ids']+[-100]*(-del_len)
-                        if self.plddt_strategy is not None:
+                        if 'pLDDT' in item: # if self.plddt_strategy is not None:
                             item['pLDDT']=item['pLDDT']+[0.]*(-del_len)
                         item['idx_b']=0
                     padding(item,del_len)
@@ -207,7 +211,7 @@ class MHClassDatasetModule(L.LightningDataModule):
                     item['attention_mask']=truncation(item['attention_mask'])
                     for label in self.label_cols:
                         item[f'{label}_ids']=truncation(item[f'{label}_ids'])
-                    if self.plddt_strategy is not None:
+                    if 'pLDDT' in item: # if self.plddt_strategy is not None:
                         item['pLDDT']=truncation(item['pLDDT'])
                     item['idx_b']=idx_b+1
                 else:
@@ -218,8 +222,9 @@ class MHClassDatasetModule(L.LightningDataModule):
                     
             for k in ['input_ids','attention_mask','idx_b']+[f'{label}_ids' for label in self.label_cols]:
                 ret[k]=torch.tensor(ret[k],dtype=torch.long)
-            if self.plddt_strategy is not None:
-                ret['pLDDT']=torch.tensor(ret['pLDDT'],dtype=torch.float)
+            # import pickle as pkl;pkl.dump(ret['pLDDT'],open('tmp.pkl','wb'))
+            if 'pLDDT' in ret: #self.plddt_strategy is not None:
+                ret['pLDDT']=torch.tensor(ret['pLDDT'],dtype=torch.float)/100
             ret['position_ids']=create_position_ids(
                 ret['input_ids'],ret['attention_mask'],ret['idx_b'].reshape(-1,1))
             if train:
@@ -232,30 +237,33 @@ class MHClassDatasetModule(L.LightningDataModule):
     def train_dataloader(self):
         collate_fn=partial(self.collate_fn,train=True)
         return DataLoader(self.trainset, batch_size=self.batch_size,
-            collate_fn=collate_fn,num_workers=self.loader_thread)
+            collate_fn=collate_fn,num_workers=min(self.loader_thread,self.batch_size))
     
     def val_dataloader(self):
         collate_fn=partial(self.collate_fn,train=False)
-        return DataLoader(self.valset, batch_size=self.batch_size,
-            collate_fn=collate_fn,num_workers=self.loader_thread)
+        #tmp hack for overfit
+        # return DataLoader(self.trainset, batch_size=self.batch_size,
+        #     collate_fn=collate_fn,num_workers=min(self.loader_thread,self.batch_size),shuffle=False)
+        return DataLoader(self.valset, batch_size=self.infer_batch_size,collate_fn=collate_fn,
+                    num_workers=min(self.loader_thread,self.infer_batch_size))
     
     def test_dataloader(self):
         collate_fn=partial(self.collate_fn,train=False,pad_to_longest=True)
-        return DataLoader(self.testset, batch_size=self.batch_size,
-            collate_fn=collate_fn,num_workers=self.loader_thread)
+        return DataLoader(self.testset, batch_size=self.infer_batch_size,
+            collate_fn=collate_fn,num_workers=min(self.loader_thread,self.infer_batch_size))
     
     def predict_dataloader(self):
         collate_fn=partial(self.collate_fn,train=False)
-        return DataLoader(self.dataset, batch_size=self.batch_size,
-            collate_fn=collate_fn,num_workers=self.loader_thread)
+        return DataLoader(self.dataset, batch_size=self.infer_batch_size,
+            collate_fn=collate_fn,num_workers=min(self.loader_thread,self.infer_batch_size))
             
-    def state_dict(self):
-        return dict(self.hparams)
+    # def state_dict(self):
+    #     return dict(self.hparams)
     
-    def load_state_dict(self, state_dict: Dict[str, Any]):
-        '''
-        untested
-        '''
+    # def load_state_dict(self, state_dict: Dict[str, Any]):
+    #     '''
+    #     untested
+    #     '''
         # import pdb;pdb.set_trace()
         # self.__init__(**state_dict)
         # raise NotImplementedError
