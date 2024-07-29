@@ -27,7 +27,7 @@ def fetch_seq_plddt(infile:str)->Tuple[str,List[float]]:
         pLDDT.append(plddt)
     return ''.join(seq), pLDDT 
 
-ALPHAS2=['Conf3','NENConf3','RENDist4','RevNbrDist4','RENConf16']
+ALPHAS2=['Conf3','NENConf3','Conf16','NENConf16','RENDist4','RevNbrDist4','RENConf16']
 
 def cal_mu_v2(infile:str,
               mubin='/home/rnalab/zfdeng/ss4/ss4_sandbox/reseek2',
@@ -53,17 +53,17 @@ def cal_mu_v2(infile:str,
                     r_pdbfile_path,
                     '-alpha',
                     i,
-                    '-fasta',
+                    '-feature_fasta',
                     'structs.fa'],cwd=tdir,capture_output=True)
                 # return _
                 output[i]=str(read(f'{tdir}/structs.fa',format='fasta').seq)
     except:
-        output['seq'],output['pLDDT']='',''
+        output['seq'],output['pLDDT']='',[]
         for i in alphas+['seq']:
             output[i]=''
     return output
 
-
+#%%
 if __name__=='__main__':
     from multiprocessing import Pool
     from glob import glob
@@ -75,11 +75,23 @@ if __name__=='__main__':
     opts=[]
     def update_bar(x):
         bar.update()
+
+    def save_interval_cal_mu_v2(i):
+        infile:Path=Path(i).absolute()
+        stem,suffix=infile.stem,infile.suffix
+        tmp_file=Path(f'../tmp_v2_save/{stem}.pkl')
+        if not tmp_file.exists():
+            output=cal_mu_v2(i)
+            pkl.dump(output,open(tmp_file,'wb'))
+        else:
+            output=pkl.load(open(tmp_file,'rb'))
+        return output
+    
     pool=Pool(processes=32,maxtasksperchild=300)
     # def tmp_fn(x):
     #     cal_mu(x)
     #     bar.update()
-    results = [pool.apply_async(cal_mu_v2, args=(i,),callback=update_bar) for i in pdbs]
+    results = [pool.apply_async(save_interval_cal_mu_v2, args=(i,),callback=update_bar) for i in pdbs]
     # for i in pdbs:
     #     pool.apply_async(cal_mu,(i,),callback=update_bar)
     pool.close()
@@ -92,7 +104,8 @@ if __name__=='__main__':
         # pd.DataFrame(opts).to_pickle('data/reseek_AF_SIWSS-v2.pkl')
         dataset=Dataset.from_list(opts)
         dataset.save_to_disk('data/reseek_AF_SIWSS-v2')
-    except:
+    except Exception as e:
+        print(e)
         pkl.dump(opts,open('data/raw-reseek_AF_SIWSS-v2.pkl','wb'))
 
 #%%

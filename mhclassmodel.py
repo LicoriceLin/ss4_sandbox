@@ -18,6 +18,7 @@ from lightning.pytorch.trainer.states import TrainerFn
 from pytorch_lightning.callbacks import ModelCheckpoint
 from collections import defaultdict
 from itertools import chain
+from torch.cuda import OutOfMemoryError,empty_cache
 # %%
 # class RelaxChainedScheduler(ChainedScheduler):
 #     def step(self,metrics=None):
@@ -381,10 +382,66 @@ class EsmTokenMhClassifier(L.LightningModule):
                 raw_opts[stem][f'{k}_label']=label_[mask].to('cpu')
 
         losses[f'loss']=loss.item()
-        self.log_dict(losses)
         if self.profile_test:
+            self.log_dict(losses,sync_dist=True)
             self.playground.update(raw_opts)
-        
+    
+    def process_ruined_batch(self):
+        if 'ruined-batch' in self.playground:
+            ruined_batch:Tensor=self.playground.pop('ruined-batch')
+            batch_size,max_length=ruined_batch['input_ids'].shape
+            logging.warn(f'OutOfMemory at {batch_size}*{max_length}, try to run them one-by-one.')
+            torch.cuda.memory_allocated()
+            for i in range(batch_size):
+                try:
+                    attention_mask=ruined_batch['attention_mask'][i].bool()
+                    output:Dict[str,Tensor]=self.inner_model(
+                        input_ids=ruined_batch['input_ids'][i][attention_mask].unsqueeze(0),#.to(self.device),
+                        attention_mask=ruined_batch['attention_mask'][i][attention_mask].unsqueeze(0),#.to(self.device),
+                        position_ids=ruined_batch['position_ids'][i][attention_mask].unsqueeze(0)#.to(self.device)
+                        )
+                    o_={
+                        'stem':ruined_batch['stem'][i],
+                        'seq':ruined_batch['seq'][i]
+                        }
+                    for k,pred in output.items():
+                        o_[k]= torch.softmax(pred[0][1:-1].to('cpu'),-1)
+                    self.playground[ruined_batch['stem'][i]]=o_
+                    del attention_mask,output,o_,k,pred
+                    # del output,attention_mask
+                except OutOfMemoryError:
+                    logging.warn(
+                    (f'OutOfMemory at {attention_mask.sum().item()} even during one-by-one run.'
+                     f"skip {ruined_batch['stem'][i]} for now"))
+            del ruined_batch
+
+    def predict_step(self, batch:Dict[str,Union[list,Tensor]], batch_idx):
+        self.process_ruined_batch()
+            # import pdb;pdb.set_trace()
+        try:
+            batch_size,max_length=batch['input_ids'].shape
+            output:Dict[str,Tensor]=self.inner_model(
+                input_ids=batch['input_ids'].detach(),
+                attention_mask=batch['attention_mask'].detach(),
+                position_ids=batch['position_ids'].detach()
+                )
+            output={k:torch.softmax(v,dim=-1).to('cpu') for k,v in output.items()}
+            for i in range(batch_size):
+                o_={
+                    'stem':batch['stem'][i],
+                    'seq':batch['seq'][i]
+                    }
+                attention_mask=batch['attention_mask'][i].bool().to('cpu')
+                for k,pred in output.items():
+                    o_[k]=pred[i][attention_mask][1:-1]
+                self.playground[batch['stem'][i]]=o_
+        except OutOfMemoryError:
+            # torch.cuda.memory_allocated
+            # move = lambda x:x.to('cpu').detach().clone() if isinstance(x,torch.Tensor) else x
+            # self.playground['ruined-batch']={k:move(v) for k,v in batch.items()}
+            self.playground['ruined-batch']=batch
+            return
+            
     def configure_optimizers(self):
         heads_parameters=[]
         for k,num_label in self.inner_model.num_mhlabels.items():
