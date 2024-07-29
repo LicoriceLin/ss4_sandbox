@@ -172,7 +172,7 @@ class MHClassDatasetModule(L.LightningDataModule):
             item.update(tokenized_inputs)
             for label in self.label_cols:
                 item[f'{label}_ids']=[self.ignore_index]+[label_maps[label].get(i,self.ignore_index) for i in item[label]]+[self.ignore_index]
-            if self.plddt_strategy is not None:
+            if 'pLDDT' in item:
                 item['pLDDT']=[0.]+item['pLDDT']+[0.]
                 if max(item['pLDDT'])>1.:
                     item['pLDDT']=[i/100 for i in item['pLDDT']]
