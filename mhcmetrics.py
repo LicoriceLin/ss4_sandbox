@@ -57,8 +57,10 @@ class MulticlassMetricBase(Metric):
                pred: Tensor, label: Tensor,
                pLDDT: Optional[Tensor]=None
                ) -> None:
+        pred,label=pred.detach(),label.detach()
         mask=(label!=self.ignore_index).reshape(-1)
         if pLDDT is not None:
+            pLDDT=pLDDT.detach()
             mask=mask & (pLDDT>=self.plddt_threshold).reshape(-1)
         label=label.reshape(-1).masked_select(mask)
         valid_pred=pred.reshape(-1,pred.shape[-1])[mask].half()
@@ -84,8 +86,9 @@ class MulticlassMetricCollection(MetricCollection):
         metrics={}
         for name,_func in {
             'accuracy':multiclass_accuracy,
-            'auroc':multiclass_auroc,
-            'auprc':multiclass_auprc
+            # TMP annotated for debug leakage
+            # 'auroc':multiclass_auroc, 
+            # 'auprc':multiclass_auprc
         }.items():
             func=partial(_func,
                 num_classes=num_classes,

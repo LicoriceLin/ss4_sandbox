@@ -371,7 +371,8 @@ class EsmTokenMhClassifier(L.LightningModule):
             loss+=l_
             losses[f'{k}_loss']=l_.item()
             metrics:MulticlassMetricCollection=getattr(self,f'metrics_test_{k}')
-            self.log_dict(metrics(pred, label,plddt)) #TODO fixed log
+            # self.log_dict() #TODO fixed log
+            metrics.update(pred, label,plddt)
             for i,stem in enumerate(batch['stem']):
                 pred_=pred[i]
                 label_=label[i]
@@ -381,7 +382,8 @@ class EsmTokenMhClassifier(L.LightningModule):
 
         losses[f'loss']=loss.item()
         self.log_dict(losses)
-        self.playground.update(raw_opts)
+        if self.profile_test:
+            self.playground.update(raw_opts)
         
     def configure_optimizers(self):
         heads_parameters=[]
@@ -673,4 +675,8 @@ class DebugCallback(Callback):
     # def on_validation_start(self, trainer: Trainer, pl_module: L.LightningModule) -> None:
     #     return super().on_validation_start(trainer, pl_module)
 
+    def on_test_epoch_end(self, trainer: Trainer, pl_module: EsmTokenMhClassifier) -> None:
+        for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
+            metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_test_{head_name}')
+            metrics.reset()
 # from lightning.pytorch.callbacks import DeviceStatsMonitor
