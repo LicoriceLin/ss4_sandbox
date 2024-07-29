@@ -160,7 +160,7 @@ class Criterion(nn.Module):
 class EsmTokenMhClassifier(L.LightningModule):  
     def __init__(self,inner_model:EsmTokenMhClassification,
             finetuned_from:Optional[str]=None,
-            metrics_interval:int=100,
+            # metrics_interval:int=100,
             ignore_index:int=-100,
             optimizer:str="Adam",
             optimizer_kwargs:Dict[str,float]={
@@ -187,7 +187,7 @@ class EsmTokenMhClassifier(L.LightningModule):
         self.optimizer=optimizer
         self.optimizer_kwargs=optimizer_kwargs
         self.scheduler_kwargs=scheduler_kwargs
-        self.metrics_interval=metrics_interval
+        # self.metrics_interval=metrics_interval
         self.ignore_index=ignore_index
         self._test_output_dir=test_output_dir
         self.profile_test=profile_test
@@ -268,29 +268,37 @@ class EsmTokenMhClassifier(L.LightningModule):
                 l_=self._l
             loss+=l_
             losses[f'train/{k}_loss']=l_.item()
-            metrics:MulticlassMetricCollection=getattr(self,f'metrics_fit_{k}')
-            # self.log_dict(metrics(pred, label,plddt),sync_dist=True)
-            metrics.update(pred, label,plddt)
+            # metrics:MulticlassMetricCollection=getattr(self,f'metrics_fit_{k}')
+            # metrics(pred, label,plddt)
+            # self.log_dict(metrics)
+            # metrics(pred, label,plddt)
             # metrics.update(pred,label,plddt)
             # self.log_dict(metrics)
         losses['train/loss']=loss.item()
         self.log_dict(losses,sync_dist=True)
-        # if torch.cuda.is_available():
-        #     allocated_memory = torch.cuda.memory_allocated(self.device) / (1024 ** 3)  
-        #     self.log(f'util/mem_{self.device.index}_train', allocated_memory,reduce_fx=torch.max,sync_dist=False)
+        
+        if torch.cuda.is_available():
+            allocated_memory = torch.cuda.memory_allocated(self.device) / (1024 ** 3)  
+            self.log(f'util/mem_{self.device.index}_train', allocated_memory,reduce_fx=torch.max,sync_dist=False)
         # return loss
 
         # heads_optimizer.zero_grad()
         self.manual_backward(loss)
         for optimizer in self.optimizers():
+            optimizer:torch.optim.Optimizer
             optimizer.step()
             optimizer.zero_grad()
 
         # if (batch_idx + 1) % 50 == 0:
         true_step=self.trainer.global_step/len(self.optimizers())
         # if (true_step+1) % (self.trainer.check_val_every_n_epoch*2) ==0:
-        if (true_step+1) % (self.update_step) ==0:
-            val_loss=self.trainer.callback_metrics["val_loss"]
+        if (true_step+1) % (self.update_step) ==0 or true_step==100:
+            try:
+                val_loss=self.trainer.callback_metrics["val_loss"]
+            except:
+                self.dumblogger.warn(f'step {true_step} without val_loss')
+                val_loss=3.
+            # TODO use `get`
             # self.dumblogger.info(f'\nstepping sch!\n val_loss={val_loss}\n')
             for sch in self.lr_schedulers():
                 sch:torch.optim.lr_scheduler.LRScheduler
@@ -330,8 +338,8 @@ class EsmTokenMhClassifier(L.LightningModule):
                 l_=self._l
             loss+=l_
             losses[f'{prefix}/{k}_loss']=l_.item()
-            metrics:MulticlassMetricCollection=getattr(self,f'metrics_validate_{k}')
-            metrics.update(pred, label,plddt)
+            # metrics:MulticlassMetricCollection=getattr(self,f'metrics_validate_{k}')
+            # metrics.update(pred, label,plddt)
             # self.log_dict(metrics) #(pred, label,plddt)
         losses[f'{prefix}_loss']=loss.item()
         losses[f'{prefix}/loss']=loss.item()
@@ -408,7 +416,7 @@ class EsmTokenMhClassifier(L.LightningModule):
                         "frequency": update_step,
                     },
                     {
-                        "scheduler": ReduceLROnPlateau(body_optimizer, factor=0.5,patience=10,threshold=0.005),
+                        "scheduler": ReduceLROnPlateau(body_optimizer, factor=0.5,patience=10,threshold=0.01),
                         "interval": "step",
                         "frequency": update_step,
                         "monitor": "val_loss",
@@ -416,7 +424,7 @@ class EsmTokenMhClassifier(L.LightningModule):
                         "strict": False,
                     },
                     {
-                        "scheduler": ReduceLROnPlateau(heads_optimizer, factor=0.5,patience=10,threshold=0.005),
+                        "scheduler": ReduceLROnPlateau(heads_optimizer, factor=0.5,patience=10,threshold=0.01),
                         "interval": "step",
                         "frequency": update_step,
                         "monitor": "val_loss",
@@ -632,20 +640,21 @@ class DebugCallback(Callback):
         # pl_module.log('util/lr',lr,rank_zero_only=True)
         pl_module.dumblogger.info('train-start!')
         # print(f'lr: {lr}')
-        return super().on_train_start(trainer, pl_module)
+        # return super().on_train_start(trainer, pl_module)
     
-    def on_train_batch_end(self, trainer: Trainer, pl_module: EsmTokenMhClassifier, outputs, batch, batch_idx) -> None:
-        true_step=trainer.global_step/len(pl_module.optimizers())
-        if true_step % trainer.log_every_n_steps == 0:
-            for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
-                metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_fit_{head_name}')
-                pl_module.log_dict(metrics.compute(),sync_dist=True)
-                metrics.reset()
+    # def on_train_batch_end(self, trainer: Trainer, pl_module: EsmTokenMhClassifier, outputs, batch, batch_idx) -> None:
+        # true_step=trainer.global_step/len(pl_module.optimizers())
+        # if true_step % trainer.log_every_n_steps == 0:
+        # for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
+        #     metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_fit_{head_name}')
+        #     # pl_module.log_dict(metrics.compute(),sync_dist=False)
+        #     metrics.reset()
+            # getattr(pl_module,f'metrics_fit_{head_name}').reset()
         
     def on_validation_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
-        for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
-            metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_fit_{head_name}')
-            metrics.reset()
+        # for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
+        #     metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_fit_{head_name}')
+        #     metrics.reset()
 
         for i,optimizer in zip(['head','body'],pl_module.optimizers()):
             optimizer:torch.optim.Optimizer
@@ -656,11 +665,11 @@ class DebugCallback(Callback):
         # pl_module.log('util/lr',lr,rank_zero_only=True)
         # print(f'lr: {lr}')
 
-    def on_validation_epoch_end(self, trainer: Trainer, pl_module: EsmTokenMhClassifier) -> None:
-        for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
-            metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_validate_{head_name}')
-            pl_module.log_dict(metrics.compute(),sync_dist=True)
-            metrics.reset()
+    # def on_validation_epoch_end(self, trainer: Trainer, pl_module: EsmTokenMhClassifier) -> None:
+    #     for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
+    #         metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_validate_{head_name}')
+    #         pl_module.log_dict(metrics.compute(),sync_dist=True)
+    #         metrics.reset()
     # def on_validation_start(self, trainer: Trainer, pl_module: L.LightningModule) -> None:
     #     return super().on_validation_start(trainer, pl_module)
 
