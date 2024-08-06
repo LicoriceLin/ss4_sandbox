@@ -390,7 +390,7 @@ class EsmTokenMhClassifier(L.LightningModule):
         for k,num_label in self.inner_model.num_mhlabels.items():
             heads_parameters.append(getattr(self.inner_model,f'neck_{k}').parameters())
             heads_parameters.append(getattr(self.inner_model,f'head_{k}').parameters())
-        heads_optimizer=torch.optim.AdamW(params=chain(*heads_parameters), lr=1e-3)
+        heads_optimizer=torch.optim.AdamW(params=chain(*heads_parameters), lr=1e-3,weight_decay=0.)
         body_optimizer=torch.optim.AdamW(params=self.inner_model.esm.parameters(), lr=1e-3)
         
         sk=self.scheduler_kwargs
@@ -403,7 +403,8 @@ class EsmTokenMhClassifier(L.LightningModule):
         
         return ([heads_optimizer,body_optimizer],[
                     {
-                        "scheduler": ConstantLR(body_optimizer, 1e-7,20),
+                        "scheduler": SequentialLR(body_optimizer,[ConstantLR(body_optimizer, 1e-8,4),
+                                        ConstantLR(body_optimizer, 1e-4,4)],milestones=[4]),
                         "interval": "step",
                         "frequency": update_step,
                     },

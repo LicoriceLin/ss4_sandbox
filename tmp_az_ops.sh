@@ -4,3 +4,5 @@ az storage blob download --account-name reseek0db --container-name traindata --n
 az storage blob upload --account-name reseek0db --container-name traindata --name reseek_AF_SIWSS-v2.tar.gz  --file reseek_AF_SIWSS-v2.tar.gz --account-key JsaGCOgCZ06HQx7/jma7jSDkYd5j/3mfNhg5IW2QKS7LdPRXZ6pQxfKzc9qgAA0CIaX6PF5pmBo1+AStY9noYQ==
 az storage blob download --account-name reseek0db --container-name traindata  --name reseek_AF_SIWSS-v2.tar.gz  --file reseek_AF_SIWSS-v2.tar.gz --account-key JsaGCOgCZ06HQx7/jma7jSDkYd5j/3mfNhg5IW2QKS7LdPRXZ6pQxfKzc9qgAA0CIaX6PF5pmBo1+AStY9noYQ==
 git clone https://github.com/LicoriceLin/ss4_sandbox.git
+
+az deployment group create --resource-group SS4  --name DataPrepBig --template-file data/DataPrepBig_template.json 
