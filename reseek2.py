@@ -36,31 +36,31 @@ def cal_mu_v2(infile:str,
     stem,suffix=infile.stem,infile.suffix
     mubin =Path(mubin).absolute()
     output={'stem':stem}
-    try:
-        with TemporaryDirectory() as tdir:
-            if suffix=='.gz':
-                r_pdbfile_path=stem
-                a_pdbfile_path=tdir+'/'+r_pdbfile_path
-                with gzip.open(infile, 'rb') as gz_file:
-                    with open(a_pdbfile_path, 'wb') as out_file:
-                        shutil.copyfileobj(gz_file, out_file)
-            else:
-                a_pdbfile_path=r_pdbfile_path=infile
-            output['seq'],output['pLDDT']=fetch_seq_plddt(a_pdbfile_path)
-            for i in alphas:
-                _=run([mubin,
-                    '-convert',
-                    r_pdbfile_path,
-                    '-alpha',
-                    i,
-                    '-feature_fasta',
-                    'structs.fa'],cwd=tdir,capture_output=True)
-                # return _
-                output[i]=str(read(f'{tdir}/structs.fa',format='fasta').seq)
-    except:
-        output['seq'],output['pLDDT']='',[]
-        for i in alphas+['seq']:
-            output[i]=''
+    # try:
+    with TemporaryDirectory() as tdir:
+        if suffix=='.gz':
+            r_pdbfile_path=stem
+            a_pdbfile_path=tdir+'/'+r_pdbfile_path
+            with gzip.open(infile, 'rb') as gz_file:
+                with open(a_pdbfile_path, 'wb') as out_file:
+                    shutil.copyfileobj(gz_file, out_file)
+        else:
+            a_pdbfile_path=r_pdbfile_path=infile
+        output['seq'],output['pLDDT']=fetch_seq_plddt(a_pdbfile_path)
+        for i in alphas:
+            _=run([mubin,
+                '-convert',
+                r_pdbfile_path,
+                '-alpha',
+                i,
+                '-feature_fasta',
+                'structs.fa'],cwd=tdir,capture_output=True)
+            # return _
+            output[i]=str(read(f'{tdir}/structs.fa',format='fasta').seq)
+    # except:
+    #     output['seq'],output['pLDDT']='',[]
+    #     for i in alphas+['seq']:
+    #         output[i]=''
     return output
 
 #%%

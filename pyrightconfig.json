@@ -36,5 +36,20 @@
       "*tar",
       "*pkl",
       "reseek*"
-    ]
+    ],
+    "reportPrivateImportUsage":"information",
+    "reportAttributeAccessIssue":"information",
+    "reportOptionalMemberAccess":"information",
+    "reportIncompatibleMethodOverride":"information",
+    "reportArgumentType":"information",
+    "reportAssignmentType": "information",
+    "reportReturnType": "information",
+    "reportPossiblyUnboundVariable": "information",
+    "reportCallIssue": "information",
+    "reportOptionalOperand": "information",
+    "reportOperatorIssue": "information",
+    "reportGeneralTypeIssues": "information",
+    "reportOptionalContextManager": "information",
+    "reportOptionalIterable": "information",
+    
 }

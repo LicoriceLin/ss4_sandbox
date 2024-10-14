@@ -311,8 +311,6 @@ class EsmTokenMhClassifier(L.LightningModule):
         # else:
         #     self.dumblogger.info(f'at global:{self.trainer.global_step},batch_idx: {batch_idx}')
             
-
-
     def _mask_nan(self,batch:dict,pred:torch.Tensor,label:torch.Tensor):
         if torch.isnan(pred).any():
             mask=torch.isnan(pred).any(dim=-1)
@@ -736,4 +734,13 @@ class DebugCallback(Callback):
         for head_name,num_classes in pl_module.inner_model.num_mhlabels.items():
             metrics:MulticlassMetricCollection=getattr(pl_module,f'metrics_test_{head_name}')
             metrics.reset()
+
+    def on_test_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
+        pl_module.init_playground()
+
+    def on_predict_epoch_start(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
+        pl_module.init_playground()
+
+    def on_predict_epoch_end(self, trainer:Trainer, pl_module:EsmTokenMhClassifier):
+        pl_module.clear_playground()
 # from lightning.pytorch.callbacks import DeviceStatsMonitor
